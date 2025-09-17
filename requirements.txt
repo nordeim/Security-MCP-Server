@@ -1,0 +1,51 @@
+# Core MCP dependencies
+mcp>=1.0.0
+
+# Web framework for HTTP transport
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+
+# Configuration management
+pydantic>=2.5.0
+pyyaml>=6.0.1
+
+# Metrics and monitoring
+prometheus-client>=0.19.0
+
+# Logging and monitoring
+structlog>=23.2.0
+
+# Async utilities
+aiofiles>=23.2.1
+aiodocker>=0.21.0
+
+# Circuit breaker
+circuitbreaker>=2.0.0
+
+# HTTP client
+httpx>=0.25.2
+requests>=2.31.0
+
+# Data validation
+jsonschema>=4.20.0
+
+# Date/time handling
+python-dateutil>=2.8.2
+
+# Cryptography (for security features)
+cryptography>=41.0.7
+
+# Network utilities
+ipaddress>=1.0.23
+
+# Process management
+psutil>=5.9.6
+
+# Development dependencies (optional)
+pytest>=7.4.3
+pytest-asyncio>=0.21.1
+pytest-cov>=4.1.0
+black>=23.11.0
+flake8>=6.1.0
+mypy>=1.7.1
+bandit>=1.7.5
