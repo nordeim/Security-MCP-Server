@@ -4107,3 +4107,5 @@ error_context = ErrorContext(
 The MCP server architecture provides a solid foundation for building secure, resilient, and observable tools. With its modular design and extensible architecture, it can be easily customized and extended to meet specific requirements. By following the best practices and guidelines outlined in this document, developers can create high-quality tools that integrate seamlessly with the MCP server.
 
 https://chat.z.ai/s/57cb1409-07a4-4d62-ac71-c3da782c5625
+
+Full: https://chat.z.ai/s/57cb1409-07a4-4d62-ac71-c3da782c5625
