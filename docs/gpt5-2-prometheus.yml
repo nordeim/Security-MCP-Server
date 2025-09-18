@@ -1,0 +1,136 @@
+Thanks — I'll apply the same rigorous, safety-minded, and practical approach to review and improve config/prometheus.yml.
+
+What I checked and the goals
+- Correctness: valid Prometheus YAML structure and fields.
+- Consistency: align scrape targets with docker-compose service names and ports.
+- Robustness: sensible per-job scrape intervals and timeouts; avoid misconfigurations that make targets un-scrapable.
+- Observability: include an external label and minimal relabeling to produce useful instance labels in Prometheus.
+- Operational advice: how to validate and common gotchas to look for.
+
+Findings (high level)
+- The existing file is generally fine and minimal, but can be improved:
+  - Add external_labels for clearer metrics ownership/identification.
+  - Set a global scrape_timeout so it's not omitted (and ensure per-job timeouts are <= scrape_interval if needed).
+  - Make scheme and metrics_path explicit for clarity.
+  - Add a small relabel config to make instance labels cleaner for the security service.
+  - Add an optional grafana scrape job (documented) — helpful if you want Grafana internal metrics.
+  - Add comments and a small checklist so you can validate the configuration locally.
+- I also double-checked the docker-compose ports: to work with the static_targets defined here, prometheus container must be accessible internally at port 9090 (container port), and the security-mcp-server_metrics must be reachable at service name security-mcp-server:9090. If you intentionally exposed Prometheus on host 9091, update docker-compose or the README for consistency (I recommended aligning host:container as 9090:9090).
+
+Proposed updated config/prometheus.yml
+```yaml name=config/prometheus.yml
+global:
+  # Default scrape and evaluation intervals
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  # Global scrape timeout (should be <= scrape_interval where appropriate)
+  scrape_timeout: 10s
+
+  # Labels that will be attached to all metrics collected by this Prometheus server.
+  # Useful when federating or distinguishing multiple Prometheus instances.
+  external_labels:
+    monitor: "security-mcp-monitor"
+
+# Uncomment or add rule files if you have alerting/recording rules
+rule_files:
+  # - "alerts/*.yml"
+
+scrape_configs:
+  - job_name: "prometheus"
+    # Prometheus scraping itself (running inside the container). Using localhost here is correct
+    # when Prometheus is executing inside the container described by docker-compose.
+    static_configs:
+      - targets: ["localhost:9090"]
+    metrics_path: "/metrics"
+    scheme: "http"
+    scrape_interval: 15s
+    scrape_timeout: 10s
+
+  - job_name: "security-mcp-server"
+    # The service name must match the docker-compose service name and be on the same network.
+    # In docker-compose the service is `security-mcp-server` and should expose metrics on 9090.
+    static_configs:
+      - targets: ["security-mcp-server:9090"]
+    metrics_path: "/metrics"
+    scheme: "http"
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    # Make instance label less noisy (strip the port from the instance label)
+    relabel_configs:
+      - source_labels: ["__address__"]
+        regex: "(.*):9090"
+        target_label: "instance"
+        replacement: "$1"
+
+  # Optional: scrape Grafana metrics (if enabled in Grafana config)
+  # Grafana exposes internal metrics at /metrics when metrics are enabled in grafana.ini
+  - job_name: "grafana"
+    static_configs:
+      - targets: ["grafana:3000"]
+    metrics_path: "/metrics"
+    scheme: "http"
+    scrape_interval: 30s
+    scrape_timeout: 10s
+    # Note: Grafana metrics must be enabled in grafana.ini (metrics.enable = true).
+    # If you don't want Grafana scraped, remove this job.
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+          # - "alertmanager:9093"  # enable and update if you run Alertmanager
+
+# Example alerting/recording rules can be placed under config/alerts/*.yml and included above via rule_files.
+# Example rule (commented):
+# groups:
+# - name: example
+#   rules:
+#   - alert: HighErrorRate
+#     expr: rate(mcp_tool_errors_total[5m]) > 0.1
+#     for: 10m
+#     labels:
+#       severity: warning
+#     annotations:
+#       summary: "High error rate detected"
+#       description: "High error rate detected in security MCP server"
+```
+
+Why these changes
+- Explicit timings (scrape_timeout) prevent Prometheus from waiting indefinitely; keeping scrape_timeout smaller than or equal to scrape_interval avoids overlapping scrapes.
+- external_labels help when you federate or aggregate metrics (and are helpful if you run multiple monitoring stacks).
+- relabel_configs produce cleaner instance labels (convenient for alerting and dashboards).
+- Explicit scheme and metrics_path avoid confusion if any service uses HTTPS or a non-standard path.
+- The grafana job is optional but useful to include; it's commented in the file to warn about Grafana config dependency.
+
+Validation checklist (how you can verify locally)
+1. Ensure docker-compose exposes ports consistently:
+   - prometheus service container port should be 9090 (host mapping may be different). The compose I suggested binds host:container 9090:9090.
+2. Start the stack:
+   - docker-compose up -d
+3. Check Prometheus targets UI:
+   - Visit http://localhost:9090/targets (or host port you mapped)
+   - Verify targets "prometheus", "security-mcp-server", and "grafana" (if used) show UP
+   - If a target is DOWN, click the target to see scrape error details.
+4. Query the targets via API:
+   - curl -sS http://localhost:9090/api/v1/targets | jq
+   - Inspect the returned JSON for statuses and lastError fields.
+5. If a target is not discoverable:
+   - From inside the prometheus container, test DNS/networking:
+     - docker exec -it prometheus sh
+     - ping -c 3 security-mcp-server
+     - curl -f http://security-mcp-server:9090/metrics
+6. If Grafana metrics don't appear, ensure grafana.ini has metrics enabled.
+7. If you plan to add Alertmanager, add the actual target(s) under alertmanagers and add rules under rule_files.
+
+Potential follow-up improvements (optional)
+- Add file_sd or consul_sd if dynamic service discovery is needed.
+- Add TLS/Basic auth scraping settings if any targets require auth.
+- Add recording rules for costly queries you plan to reuse often.
+- Add alerting rules for health checks (down targets, high error rates, resource saturation).
+
+What I changed in this repository (narrative)
+I reviewed the existing config/prometheus.yml, consolidated settings that can cause subtle mis-scrapes (timeouts, labels), and produced a clarified, slightly more operational configuration that will be easier to troubleshoot and aligns with the docker-compose service names and ports described earlier. The next step is to apply this file and validate the targets UI; if you want, I can produce a small PR with the updated file and a CI job that checks Prometheus configuration syntax (promtool) and verifies the compose stack boots in a smoke test.
+
+Would you like me to open a PR adding this updated config/prometheus.yml and a small smoke-test GitHub Action that validates the Prometheus configuration (using promtool) and checks /targets after docker-compose up?
+
+https://github.com/copilot/share/c8111184-0804-8cd5-a900-7e48a46921e2
