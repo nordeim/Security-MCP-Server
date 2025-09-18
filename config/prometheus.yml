@@ -1,0 +1,74 @@
+global:
+  # Default scrape and evaluation intervals
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  # Global scrape timeout (should be <= scrape_interval where appropriate)
+  scrape_timeout: 10s
+
+  # Labels that will be attached to all metrics collected by this Prometheus server.
+  # Useful when federating or distinguishing multiple Prometheus instances.
+  external_labels:
+    monitor: "security-mcp-monitor"
+
+# Uncomment or add rule files if you have alerting/recording rules
+rule_files:
+  # - "alerts/*.yml"
+
+scrape_configs:
+  - job_name: "prometheus"
+    # Prometheus scraping itself (running inside the container). Using localhost here is correct
+    # when Prometheus is executing inside the container described by docker-compose.
+    static_configs:
+      - targets: ["localhost:9090"]
+    metrics_path: "/metrics"
+    scheme: "http"
+    scrape_interval: 15s
+    scrape_timeout: 10s
+
+  - job_name: "security-mcp-server"
+    # The service name must match the docker-compose service name and be on the same network.
+    # In docker-compose the service is `security-mcp-server` and should expose metrics on 9090.
+    static_configs:
+      - targets: ["security-mcp-server:9090"]
+    metrics_path: "/metrics"
+    scheme: "http"
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    # Make instance label less noisy (strip the port from the instance label)
+    relabel_configs:
+      - source_labels: ["__address__"]
+        regex: "(.*):9090"
+        target_label: "instance"
+        replacement: "$1"
+
+  # Optional: scrape Grafana metrics (if enabled in Grafana config)
+  # Grafana exposes internal metrics at /metrics when metrics are enabled in grafana.ini
+  - job_name: "grafana"
+    static_configs:
+      - targets: ["grafana:3000"]
+    metrics_path: "/metrics"
+    scheme: "http"
+    scrape_interval: 30s
+    scrape_timeout: 10s
+    # Note: Grafana metrics must be enabled in grafana.ini (metrics.enable = true).
+    # If you don't want Grafana scraped, remove this job.
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+          # - "alertmanager:9093"  # enable and update if you run Alertmanager
+
+# Example alerting/recording rules can be placed under config/alerts/*.yml and included above via rule_files.
+# Example rule (commented):
+# groups:
+# - name: example
+#   rules:
+#   - alert: HighErrorRate
+#     expr: rate(mcp_tool_errors_total[5m]) > 0.1
+#     for: 10m
+#     labels:
+#       severity: warning
+#     annotations:
+#       summary: "High error rate detected"
+#       description: "High error rate detected in security MCP server"
