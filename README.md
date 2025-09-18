@@ -1,4 +1,3 @@
-```markdown
 # Security MCP Server
 
 [![Docker](https://img.shields.io/badge/Docker-Ready-blue?style=for-the-badge&logo=docker)](https://www.docker.com/)
@@ -518,4 +517,3 @@ If you need help with the Security MCP Server:
 4. **Join Discussions**: Participate in GitHub Discussions for community support
 
 For security concerns or vulnerabilities, please follow our [Security Policy](SECURITY.md).
-```
