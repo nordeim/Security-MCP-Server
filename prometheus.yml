@@ -1,0 +1,211 @@
+# =============================================================================
+# Prometheus Configuration for MCP Server
+# =============================================================================
+# Metrics collection and monitoring configuration
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Global Configuration
+# -----------------------------------------------------------------------------
+global:
+  # How frequently to scrape targets
+  scrape_interval: 15s
+  
+  # How frequently to evaluate rules
+  evaluation_interval: 15s
+  
+  # Scrape timeout
+  scrape_timeout: 10s
+  
+  # External labels to attach to metrics
+  external_labels:
+    monitor: 'mcp-monitor'
+    environment: 'production'
+    region: 'us-east-1'
+
+# -----------------------------------------------------------------------------
+# Alertmanager Configuration
+# -----------------------------------------------------------------------------
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+          # - 'alertmanager:9093'
+      # Timeout for sending alerts
+      timeout: 10s
+      # Path prefix for Alertmanager
+      path_prefix: /alertmanager
+
+# -----------------------------------------------------------------------------
+# Rule Files
+# -----------------------------------------------------------------------------
+rule_files:
+  - '/etc/prometheus/alerts.yml'
+  # - '/etc/prometheus/recording_rules.yml'
+
+# -----------------------------------------------------------------------------
+# Scrape Configurations
+# -----------------------------------------------------------------------------
+scrape_configs:
+  # ---------------------------------------------------------------------------
+  # Prometheus Self-Monitoring
+  # ---------------------------------------------------------------------------
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+    metrics_path: /metrics
+    scrape_interval: 10s
+    
+    # Metadata labels
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'prometheus'
+
+  # ---------------------------------------------------------------------------
+  # MCP Server Metrics
+  # ---------------------------------------------------------------------------
+  - job_name: 'mcp-server'
+    static_configs:
+      - targets: ['mcp-server:9090']
+    metrics_path: /metrics
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    
+    # Add custom labels
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'mcp-server-primary'
+      - target_label: service
+        replacement: 'mcp'
+      - target_label: component
+        replacement: 'server'
+    
+    # Metric relabeling
+    metric_relabel_configs:
+      # Drop debug metrics in production
+      - source_labels: [__name__]
+        regex: 'debug_.*'
+        action: drop
+      
+      # Keep only important metrics
+      - source_labels: [__name__]
+        regex: '(mcp_tool_execution_.*|mcp_health_.*|mcp_circuit_breaker_.*|up)'
+        action: keep
+
+  # ---------------------------------------------------------------------------
+  # Node Exporter (Host Metrics)
+  # ---------------------------------------------------------------------------
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets: ['node-exporter:9100']
+    scrape_interval: 30s
+    
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'docker-host'
+      - target_label: job
+        replacement: 'node'
+
+  # ---------------------------------------------------------------------------
+  # cAdvisor (Container Metrics)
+  # ---------------------------------------------------------------------------
+  - job_name: 'cadvisor'
+    static_configs:
+      - targets: ['cadvisor:8080']
+    scrape_interval: 30s
+    
+    # Container-specific relabeling
+    metric_relabel_configs:
+      # Extract container name
+      - source_labels: [container_label_com_docker_compose_service]
+        target_label: service
+      
+      # Keep only relevant container metrics
+      - source_labels: [__name__]
+        regex: 'container_(cpu|memory|network|disk)_.*'
+        action: keep
+      
+      # Drop metrics for pause containers
+      - source_labels: [container_name]
+        regex: 'POD|pause'
+        action: drop
+
+  # ---------------------------------------------------------------------------
+  # Grafana Metrics (Optional)
+  # ---------------------------------------------------------------------------
+  - job_name: 'grafana'
+    static_configs:
+      - targets: ['grafana:3000']
+    metrics_path: /metrics
+    scrape_interval: 30s
+    
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'grafana'
+
+  # ---------------------------------------------------------------------------
+  # Service Discovery for Docker Swarm (Optional)
+  # ---------------------------------------------------------------------------
+  # - job_name: 'docker-swarm'
+  #   dockerswarm_sd_configs:
+  #     - host: unix:///var/run/docker.sock
+  #       role: tasks
+  #   
+  #   relabel_configs:
+  #     # Only keep containers with prometheus labels
+  #     - source_labels: [__meta_docker_container_label_prometheus_io_scrape]
+  #       regex: 'true'
+  #       action: keep
+  #     
+  #     # Use container label for job name
+  #     - source_labels: [__meta_docker_container_label_prometheus_io_job]
+  #       target_label: job
+  #     
+  #     # Use container name as instance
+  #     - source_labels: [__meta_docker_container_name]
+  #       target_label: instance
+
+  # ---------------------------------------------------------------------------
+  # DNS Service Discovery (Optional)
+  # ---------------------------------------------------------------------------
+  # - job_name: 'dns-discovery'
+  #   dns_sd_configs:
+  #     - names:
+  #         - '_prometheus._tcp.mcp.local'
+  #       type: 'SRV'
+  #       refresh_interval: 30s
+
+# -----------------------------------------------------------------------------
+# Remote Write Configuration (Optional)
+# -----------------------------------------------------------------------------
+# remote_write:
+#   - url: 'https://prometheus-remote.example.com/api/v1/write'
+#     remote_timeout: 30s
+#     write_relabel_configs:
+#       - source_labels: [__name__]
+#         regex: 'mcp_.*'
+#         action: keep
+#     queue_config:
+#       capacity: 10000
+#       max_shards: 5
+#       max_samples_per_send: 1000
+
+# -----------------------------------------------------------------------------
+# Remote Read Configuration (Optional)
+# -----------------------------------------------------------------------------
+# remote_read:
+#   - url: 'https://prometheus-remote.example.com/api/v1/read'
+#     read_recent: true
+
+# -----------------------------------------------------------------------------
+# Storage Configuration
+# -----------------------------------------------------------------------------
+# storage:
+#   tsdb:
+#     retention:
+#       time: 30d
+#       size: 10GB
