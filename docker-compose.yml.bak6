@@ -45,7 +45,6 @@ services:
       cache_from:
         - mcp-server:latest
     restart: unless-stopped
-    stop_grace_period: 30s
 
     networks:
       - mcp-public
@@ -81,7 +80,10 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_FORMAT: "${LOG_FORMAT:-%(asctime)s %(levelname)s %(name)s %(message)s}"
 
-    # Use the image-defined healthcheck to avoid drift
+    # Use image-defined healthcheck; avoid drift with compose healthcheck
+    # healthcheck: (removed)
+
+    # Only keep depends_on if truly required. If so, prefer health-based condition:
     depends_on:
       prometheus:
         condition: service_healthy
@@ -104,19 +106,15 @@ services:
     container_name: prometheus
     image: prom/prometheus:${PROMETHEUS_VERSION:-v2.45.0}
     restart: unless-stopped
-
     networks:
       - mcp-internal
       - mcp-public
-
     ports:
       - "${PROMETHEUS_PORT:-9091}:9090"
-
     volumes:
       - ./docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./docker/alerts.yml:/etc/prometheus/alerts.yml:ro
       - prometheus-data:/prometheus:rw
-
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
@@ -126,7 +124,6 @@ services:
       - '--web.console.templates=/usr/share/prometheus/consoles'
       - '--web.enable-lifecycle'
       - '--web.enable-admin-api'
-
     deploy:
       resources:
         limits:
@@ -135,13 +132,11 @@ services:
         reservations:
           cpus: '0.25'
           memory: 128M
-
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
       interval: 30s
       timeout: 10s
       retries: 3
-
     labels:
       - "prometheus.io/scrape=false"
 
@@ -149,19 +144,15 @@ services:
     container_name: grafana
     image: grafana/grafana:${GRAFANA_VERSION:-10.0.0}
     restart: unless-stopped
-
     networks:
       - mcp-public
       - mcp-internal
-
     ports:
       - "${GRAFANA_PORT:-3000}:3000"
-
     volumes:
       - grafana-data:/var/lib/grafana:rw
       - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
-
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
@@ -169,7 +160,6 @@ services:
       GF_SERVER_ROOT_URL: ${GRAFANA_ROOT_URL:-http://localhost:3000}
       GF_ANALYTICS_REPORTING_ENABLED: 'false'
       GF_ANALYTICS_CHECK_FOR_UPDATES: 'false'
-
     deploy:
       resources:
         limits:
@@ -178,16 +168,13 @@ services:
         reservations:
           cpus: '0.25'
           memory: 128M
-
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/api/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-
     depends_on:
       - prometheus
-
     labels:
       - "prometheus.io/scrape=false"
 
@@ -195,20 +182,16 @@ services:
     container_name: node-exporter
     image: prom/node-exporter:${NODE_EXPORTER_VERSION:-v1.6.0}
     restart: unless-stopped
-
     networks:
       - mcp-internal
-
     volumes:
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
       - /:/rootfs:ro
-
     command:
       - '--path.procfs=/host/proc'
       - '--path.sysfs=/host/sys'
       - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
-
     deploy:
       resources:
         limits:
@@ -217,7 +200,6 @@ services:
         reservations:
           cpus: '0.1'
           memory: 32M
-
     labels:
       - "prometheus.io/scrape=true"
       - "prometheus.io/port=9100"
@@ -226,22 +208,17 @@ services:
     container_name: cadvisor
     image: gcr.io/cadvisor/cadvisor:${CADVISOR_VERSION:-v0.47.0}
     restart: unless-stopped
-
     networks:
       - mcp-internal
-
     volumes:
       - /:/rootfs:ro
       - /var/run:/var/run:ro
       - /sys:/sys:ro
       - /var/lib/docker/:/var/lib/docker:ro
       - /dev/disk/:/dev/disk:ro
-
     privileged: true
-
     devices:
       - /dev/kmsg
-
     deploy:
       resources:
         limits:
@@ -250,8 +227,6 @@ services:
         reservations:
           cpus: '0.1'
           memory: 64M
-
     labels:
       - "prometheus.io/scrape=true"
       - "prometheus.io/port=8080"
-
