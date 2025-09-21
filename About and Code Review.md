@@ -1,3 +1,511 @@
+## 🛡️ What Security MCP Server Is
+It’s an **enterprise-grade orchestration framework** for running and managing security tools in a **safe, reliable, and observable** way. Think of it as a **control plane for security scanners** (like Nmap, Masscan, Gobuster), but wrapped with production-ready features: circuit breakers, health monitoring, metrics, and strict safety controls.
+
+Instead of running tools ad hoc, this server provides a **unified, extensible platform** where tools can be executed via **HTTP API or stdio**, with **sandboxing, validation, and monitoring** built in.
+
+---
+
+## ✨ Core Value Proposition
+It solves common pain points in security operations:
+- **Tool sprawl** → unify many tools under one consistent interface  
+- **Reliability issues** → circuit breakers, retries, graceful degradation  
+- **Resource conflicts** → concurrency limits, rate limiting, timeouts  
+- **Lack of visibility** → Prometheus metrics, structured logs, health checks  
+- **Safety concerns** → strict input validation, private network enforcement, sandboxed execution  
+
+---
+
+## 🏗️ Architecture Highlights
+- **Transport Layer**: Supports both stdio (CLI) and HTTP/REST API  
+- **Server Core**:  
+  - `EnhancedMCPServer` orchestrates everything  
+  - `ToolRegistry` manages available tools  
+  - `HealthManager` and `MetricsManager` provide observability  
+- **Tool Framework**:  
+  - All tools inherit from `MCPBaseTool`  
+  - Built-in input validation, resource limits, circuit breaker integration  
+- **Security Layer**:  
+  - Only allows RFC1918 private IP ranges  
+  - Whitelisted flags per tool  
+  - No shell execution (`shell=False`)  
+  - Output size and timeout limits  
+- **Observability**:  
+  - Prometheus metrics endpoint  
+  - Health checks with priority levels (critical, important, informational)  
+  - Audit logging and correlation IDs for traceability  
+
+---
+
+## 🔧 Built-in Tools
+- **NmapTool** → network discovery, port scanning, OS fingerprinting  
+- **MasscanTool** → ultra-fast port scanning for large ranges  
+- **GobusterTool** → directory, DNS, and vhost enumeration  
+
+Each tool has **safety guards** (rate limits, thread caps, wordlist validation, etc.).
+
+---
+
+## 🚀 Deployment Options
+- **Docker Compose** (recommended for quick start)  
+- **Kubernetes** (scalable, with probes and resource limits)  
+- **SystemD service** (for bare-metal/VM installs)  
+
+---
+
+## 📊 Observability & Metrics
+- Prometheus metrics like:
+  - `mcp_tool_execution_total` (per-tool executions)  
+  - `mcp_tool_execution_seconds` (execution time histograms)  
+  - `mcp_circuit_breaker_state` (resilience tracking)  
+- Pre-built Grafana dashboards for visualization  
+- Real-time events via Server-Sent Events (SSE)  
+
+---
+
+## 🔮 Roadmap (from README)
+- **v2.1 (Q1 2025)**: WebSocket streaming, built-in auth, Redis caching  
+- **v2.2 (Q2 2025)**: Kubernetes operator, multi-tenancy, tool marketplace  
+- **v3.0 (Q3 2025)**: Distributed execution, GraphQL API, tool chaining/workflows  
+
+---
+
+## 🎯 Use Cases
+- **SOC automation**: orchestrating scans in incident response  
+- **DevSecOps pipelines**: pre-deployment scanning, compliance checks  
+- **Penetration testing**: controlled recon and enumeration  
+- **Research**: benchmarking and comparing security tools  
+
+---
+
+✅ **In short**:  
+The Security MCP Server is a **security automation backbone**—a hardened, extensible orchestration layer that makes running security tools **safe, observable, and production-ready**.
+
+---
+## Project Structure
+
+### File Hierarchy
+
+```
+mcp-server/
+├── mcp_server/
+│   ├── __init__.py              # Package initialization
+│   ├── server.py                 # Main server implementation
+│   ├── base_tool.py             # Base class for all tools
+│   ├── config.py                # Configuration management
+│   ├── health.py                # Health monitoring system
+│   ├── metrics.py               # Metrics collection
+│   ├── circuit_breaker.py      # Circuit breaker implementation
+│   │
+│   └── tools/                   # Tool implementations
+│       ├── __init__.py
+│       ├── nmap_tool.py         # Nmap network scanner
+│       ├── masscan_tool.py      # Masscan port scanner
+│       └── gobuster_tool.py     # Gobuster enumeration
+│
+├── tests/                       # Test suite
+│   ├── __init__.py
+│   ├── test_server.py
+│   ├── test_base_tool.py
+│   ├── test_config.py
+│   ├── test_health.py
+│   ├── test_metrics.py
+│   ├── test_circuit_breaker.py
+│   └── test_tools/
+│       ├── test_nmap_tool.py
+│       ├── test_masscan_tool.py
+│       └── test_gobuster_tool.py
+│
+├── config/                      # Configuration files
+│   ├── config.yaml             # YAML configuration
+│   └── config.json             # JSON configuration
+│
+├── docs/                       # Documentation
+│   ├── API.md                  # API documentation
+│   ├── TOOLS.md                # Tool documentation
+│   └── DEPLOYMENT.md           # Deployment guide
+│
+├── scripts/                    # Utility scripts
+│   ├── install.sh              # Installation script
+│   └── health_check.py         # Health check utility
+│
+├── .env.example                # Environment template
+├── docker-compose.yml          # Docker composition
+├── Dockerfile                  # Container definition
+├── requirements.txt            # Python dependencies
+├── pyproject.toml             # Project metadata
+└── README.md                  # Project documentation
+```
+
+---
+
+## Architecture Diagrams
+
+### Component Architecture
+
+```mermaid
+graph TB
+    subgraph "Client Layer"
+        CLI[CLI Client]
+        HTTP[HTTP Client]
+        MCP[MCP Client]
+    end
+    
+    subgraph "Transport Layer"
+        STDIO[STDIO Transport]
+        REST[REST API]
+    end
+    
+    subgraph "Server Core"
+        ES[EnhancedMCPServer]
+        TR[ToolRegistry]
+        HM[HealthManager]
+        MM[MetricsManager]
+    end
+    
+    subgraph "Tool Framework"
+        BT[BaseTool]
+        CB[CircuitBreaker]
+        VAL[Validator]
+        EXEC[Executor]
+    end
+    
+    subgraph "Tools"
+        NMAP[NmapTool]
+        MASS[MasscanTool]
+        GOB[GobusterTool]
+    end
+    
+    subgraph "Infrastructure"
+        CFG[Config]
+        LOG[Logging]
+        PROM[Prometheus]
+    end
+    
+    CLI --> STDIO
+    HTTP --> REST
+    MCP --> STDIO
+    
+    STDIO --> ES
+    REST --> ES
+    
+    ES --> TR
+    ES --> HM
+    ES --> MM
+    
+    TR --> BT
+    BT --> CB
+    BT --> VAL
+    BT --> EXEC
+    
+    NMAP --> BT
+    MASS --> BT
+    GOB --> BT
+    
+    ES --> CFG
+    ES --> LOG
+    MM --> PROM
+    
+    style ES fill:#f9f,stroke:#333,stroke-width:4px
+    style BT fill:#bbf,stroke:#333,stroke-width:2px
+```
+
+### Data Flow Diagram
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Server
+    participant ToolRegistry
+    participant Tool
+    participant CircuitBreaker
+    participant Executor
+    participant Metrics
+    
+    Client->>Server: Request (target, tool, args)
+    Server->>Server: Validate transport
+    Server->>ToolRegistry: Get tool
+    
+    alt Tool not found
+        ToolRegistry-->>Client: Error: Tool not found
+    else Tool disabled
+        ToolRegistry-->>Client: Error: Tool disabled
+    else Tool available
+        ToolRegistry->>Tool: Execute request
+        
+        Tool->>CircuitBreaker: Check state
+        alt Circuit open
+            CircuitBreaker-->>Client: Error: Circuit open
+        else Circuit closed/half-open
+            CircuitBreaker->>Tool: Proceed
+            
+            Tool->>Tool: Validate input
+            alt Validation failed
+                Tool-->>Client: Error: Invalid input
+            else Validation passed
+                Tool->>Executor: Spawn process
+                
+                Executor->>Executor: Apply limits
+                Executor->>Executor: Execute command
+                
+                alt Timeout
+                    Executor-->>Tool: Timeout error
+                    Tool->>CircuitBreaker: Record failure
+                else Success
+                    Executor-->>Tool: Output
+                    Tool->>CircuitBreaker: Record success
+                end
+                
+                Tool->>Metrics: Record execution
+                Tool-->>Client: Response
+            end
+        end
+    end
+```
+
+### Tool Execution Flow
+
+```mermaid
+flowchart TD
+    Start([Client Request]) --> Parse[Parse Request]
+    Parse --> GetTool{Tool Exists?}
+    
+    GetTool -->|No| ErrorNotFound[Return Error: Not Found]
+    GetTool -->|Yes| CheckEnabled{Tool Enabled?}
+    
+    CheckEnabled -->|No| ErrorDisabled[Return Error: Disabled]
+    CheckEnabled -->|Yes| CheckCircuit{Circuit Breaker OK?}
+    
+    CheckCircuit -->|Open| ErrorCircuit[Return Error: Circuit Open]
+    CheckCircuit -->|Closed/Half-Open| ValidateInput[Validate Input]
+    
+    ValidateInput --> CheckTarget{Valid Target?}
+    CheckTarget -->|No| ErrorTarget[Return Error: Invalid Target]
+    CheckTarget -->|Yes| CheckArgs{Valid Arguments?}
+    
+    CheckArgs -->|No| ErrorArgs[Return Error: Invalid Args]
+    CheckArgs -->|Yes| AcquireSemaphore[Acquire Semaphore]
+    
+    AcquireSemaphore --> ExecuteTool[Execute Tool]
+    ExecuteTool --> CheckTimeout{Timeout?}
+    
+    CheckTimeout -->|Yes| KillProcess[Kill Process]
+    KillProcess --> RecordFailure[Record Failure]
+    RecordFailure --> UpdateCircuit1[Update Circuit Breaker]
+    UpdateCircuit1 --> ErrorTimeout[Return Error: Timeout]
+    
+    CheckTimeout -->|No| CheckSuccess{Success?}
+    
+    CheckSuccess -->|No| RecordFailure2[Record Failure]
+    RecordFailure2 --> UpdateCircuit2[Update Circuit Breaker]
+    UpdateCircuit2 --> ReturnError[Return Error Output]
+    
+    CheckSuccess -->|Yes| RecordSuccess[Record Success]
+    RecordSuccess --> UpdateCircuit3[Update Circuit Breaker]
+    UpdateCircuit3 --> RecordMetrics[Record Metrics]
+    RecordMetrics --> ReturnSuccess[Return Success Output]
+    
+    ErrorNotFound --> End([End])
+    ErrorDisabled --> End
+    ErrorCircuit --> End
+    ErrorTarget --> End
+    ErrorArgs --> End
+    ErrorTimeout --> End
+    ReturnError --> End
+    ReturnSuccess --> End
+    
+    style Start fill:#e1f5e1
+    style End fill:#ffe1e1
+    style ReturnSuccess fill:#e1ffe1
+    style ExecuteTool fill:#fff4e1
+```
+
+---
+
+## Core Components
+
+### 1. **server.py** - Main Server Implementation
+
+**Purpose**: Orchestrates the entire MCP server, managing transports, tools, and monitoring.
+
+**Key Classes**:
+- `EnhancedMCPServer`: Main server class
+- `ToolRegistry`: Tool management and registration
+
+**Interfaces**:
+```python
+class EnhancedMCPServer:
+    def __init__(self, tools: List[MCPBaseTool], transport: str = "stdio", config=None)
+    async def run(self) -> None
+    async def run_stdio_original(self) -> None
+    async def run_http_enhanced(self) -> None
+```
+
+**Dependencies**:
+- `config.py`: Configuration management
+- `health.py`: Health monitoring
+- `metrics.py`: Metrics collection
+- `base_tool.py`: Tool framework
+
+### 2. **base_tool.py** - Tool Framework
+
+**Purpose**: Provides the base class and framework for all tool implementations.
+
+**Key Classes**:
+- `MCPBaseTool`: Abstract base class for tools
+- `ToolInput`: Input validation model
+- `ToolOutput`: Output structure model
+- `ErrorContext`: Error handling context
+
+**Interfaces**:
+```python
+class MCPBaseTool(ABC):
+    async def run(self, inp: ToolInput, timeout_sec: Optional[float] = None) -> ToolOutput
+    async def _execute_tool(self, inp: ToolInput, timeout_sec: Optional[float] = None) -> ToolOutput
+    async def _spawn(self, cmd: Sequence[str], timeout_sec: float) -> ToolOutput
+```
+
+**Key Features**:
+- Input validation
+- Resource limits (CPU, memory, output size)
+- Circuit breaker integration
+- Metrics collection
+- Error handling
+
+### 3. **config.py** - Configuration Management
+
+**Purpose**: Centralized configuration with hot-reload, validation, and multiple sources.
+
+**Key Classes**:
+- `MCPConfig`: Main configuration class
+- Various dataclasses for configuration sections
+
+**Interfaces**:
+```python
+def get_config(config_path: Optional[str] = None, force_new: bool = False) -> MCPConfig
+def reset_config() -> None
+
+class MCPConfig:
+    def load_config(self) -> None
+    def reload_config(self) -> bool
+    def save_config(self, file_path: Optional[str] = None) -> None
+    def to_dict(self, redact_sensitive: bool = True) -> Dict[str, Any]
+```
+
+**Configuration Sources** (priority order):
+1. Environment variables (highest)
+2. Configuration file (YAML/JSON)
+3. Default values (lowest)
+
+### 4. **health.py** - Health Monitoring
+
+**Purpose**: Comprehensive health monitoring with priority-based checks.
+
+**Key Classes**:
+- `HealthCheckManager`: Manages all health checks
+- `SystemResourceHealthCheck`: CPU/memory/disk monitoring
+- `ToolAvailabilityHealthCheck`: Tool availability verification
+- `ProcessHealthCheck`: Process health monitoring
+
+**Interfaces**:
+```python
+class HealthCheckManager:
+    def add_health_check(self, health_check: HealthCheck, priority: int = 2) -> None
+    def register_check(self, name: str, check_func: Callable, priority: int = 2) -> None
+    async def run_health_checks(self) -> SystemHealth
+    async def start_monitoring(self) -> None
+```
+
+**Health Check Priorities**:
+- 0: Critical (any failure = system unhealthy)
+- 1: Important (failures = system degraded)
+- 2: Informational (logged but don't affect overall status)
+
+### 5. **metrics.py** - Metrics Collection
+
+**Purpose**: Metrics collection with Prometheus integration and memory management.
+
+**Key Classes**:
+- `MetricsManager`: Central metrics management
+- `ToolMetrics`: Per-tool metrics wrapper
+- `SystemMetrics`: System-wide metrics
+
+**Interfaces**:
+```python
+class MetricsManager:
+    def get_tool_metrics(self, tool_name: str) -> ToolMetrics
+    def record_tool_execution(self, tool_name: str, success: bool, execution_time: float) -> None
+    def get_all_stats(self) -> Dict[str, Any]
+    def get_prometheus_metrics(self) -> Optional[str]
+```
+
+**Metrics Collected**:
+- Execution count, success/failure rates
+- Execution time (min, max, average, percentiles)
+- Active executions
+- Error types and frequencies
+
+### 6. **circuit_breaker.py** - Resilience Pattern
+
+**Purpose**: Implements circuit breaker pattern for failure isolation.
+
+**Key Classes**:
+- `CircuitBreaker`: Main circuit breaker implementation
+- `CircuitBreakerState`: State enumeration (CLOSED, OPEN, HALF_OPEN)
+
+**Interfaces**:
+```python
+class CircuitBreaker:
+    async def call(self, func: Callable, *args, **kwargs) -> Any
+    async def force_open(self) -> None
+    async def force_close(self) -> None
+    def get_stats(self) -> dict
+```
+
+**Features**:
+- Adaptive timeout with exponential backoff
+- Jitter to prevent thundering herd
+- Comprehensive statistics
+- Prometheus metrics integration
+
+---
+
+## Tool System
+
+### Tool Base Class
+
+All tools inherit from `MCPBaseTool` and must implement:
+
+```python
+class MyTool(MCPBaseTool):
+    command_name: str = "mytool"  # System command to execute
+    allowed_flags: Sequence[str] = ["-v", "--output"]  # Allowed command flags
+    default_timeout_sec: float = 300.0  # Default timeout
+    concurrency: int = 2  # Max concurrent executions
+    
+    # Optional: Override execution for custom logic
+    async def _execute_tool(self, inp: ToolInput, timeout_sec: Optional[float] = None) -> ToolOutput:
+        # Custom validation or processing
+        return await super()._execute_tool(inp, timeout_sec)
+```
+
+### Existing Tools
+
+#### **NmapTool** (`nmap_tool.py`)
+- **Purpose**: Network discovery and security auditing
+- **Features**: Port scanning, service detection, OS fingerprinting
+- **Safety**: Network range limits, script validation, rate limiting
+
+#### **MasscanTool** (`masscan_tool.py`)
+- **Purpose**: Fast port scanning for large networks
+- **Features**: High-speed scanning, banner grabbing
+- **Safety**: Rate limiting, packet rate enforcement
+
+#### **GobusterTool** (`gobuster_tool.py`)
+- **Purpose**: Directory/DNS/vhost enumeration
+- **Modes**: dir (directories), dns (subdomains), vhost (virtual hosts)
+- **Safety**: Thread limits, wordlist validation
+
+---
 # Codebase review and validation against PAD and README
 
 Below is a focused, auditable review of the specified modules, validating implementation details against the architecture intent described in the PAD and README. Each section highlights confirmations, notable design choices, potential gaps or risks, and concrete test validations.
