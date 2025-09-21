@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# MCP Server - Docker Entrypoint Script (simplified & robust)
+# MCP Server - Docker Entrypoint Script (hardened)
 # =============================================================================
 
 set -Eeuo pipefail
@@ -24,6 +24,25 @@ log_info(){ echo -e "${GREEN}[INFO]${NC} $*"; }
 log_warn(){ echo -e "${YELLOW}[WARN]${NC} $*" >&2; }
 log_error(){ echo -e "${RED}[ERROR]${NC} $*" >&2; }
 
+shutdown_handler() {
+  log_info "Received shutdown signal; initiating graceful shutdown..."
+  if [[ -n "${MCP_PID:-}" ]]; then
+    kill -TERM "${MCP_PID}" 2>/dev/null || true
+    local timeout="${MCP_SERVER_SHUTDOWN_GRACE_PERIOD}"
+    local count=0
+    while kill -0 "${MCP_PID}" 2>/dev/null && [[ ${count} -lt ${timeout} ]]; do
+      sleep 1; ((count++))
+    done
+    if kill -0 "${MCP_PID}" 2>/dev/null; then
+      log_warn "Forcing shutdown after ${timeout}s..."
+      kill -KILL "${MCP_PID}" 2>/dev/null || true
+    fi
+  fi
+  log_info "Shutdown complete"
+  exit 0
+}
+trap shutdown_handler SIGTERM SIGINT SIGQUIT
+
 ensure_dirs() {
   mkdir -p "${MCP_HOME}" "${MCP_LOG_PATH}" "${MCP_DATA_PATH}" "$(dirname "${MCP_CONFIG_PATH}")"
 }
@@ -31,6 +50,7 @@ ensure_dirs() {
 ensure_ownership() {
   for dir in "${MCP_LOG_PATH}" "${MCP_DATA_PATH}" "$(dirname "${MCP_CONFIG_PATH}")"; do
     if [[ -d "${dir}" ]]; then
+      # Only chown if not already owned by mcp to avoid churn
       if [[ "$(stat -c '%u:%g' "${dir}")" != "${MCP_UID}:${MCP_GID}" ]]; then
         log_info "Fixing ownership for ${dir}"
         chown -R "${MCP_UID}:${MCP_GID}" "${dir}" || log_warn "Could not chown ${dir}"
@@ -149,6 +169,15 @@ wait_for_dependencies() {
   fi
 }
 
+start_application() {
+  log_info "Starting MCP Server..."
+  export PYTHONPATH="${MCP_HOME}:${PYTHONPATH:-}"
+  cd "${MCP_HOME}"
+  local cmd=( "${PY_EXEC}" -m mcp_server.server )
+  [[ "${DEVELOPMENT_MODE:-false}" == "true" ]] && log_warn "Running in DEVELOPMENT mode" && cmd+=( --debug )
+  exec "${cmd[@]}"
+}
+
 main() {
   log_info "MCP Server Docker Entrypoint"
   log_info "Version: ${MCP_VERSION:-latest}"
@@ -163,12 +192,12 @@ main() {
 
   # Drop privileges to mcp if running as root, then exec the app directly
   if [[ "$(id -u)" -eq 0 ]]; then
-    log_info "Dropping privileges to mcp"
-    exec gosu mcp:mcp "${PY_EXEC}" -m mcp_server.server ${DEVELOPMENT_MODE:+--debug}
+      log_info "Dropping privileges to mcp"
+      exec gosu mcp:mcp "${PY_EXEC}" -m mcp_server.server ${DEVELOPMENT_MODE:+--debug}
   else
-    exec "${PY_EXEC}" -m mcp_server.server ${DEVELOPMENT_MODE:+--debug}
+      exec "${PY_EXEC}" -m mcp_server.server ${DEVELOPMENT_MODE:+--debug}
   fi
+
 }
 
 main "$@"
-
