@@ -26,7 +26,7 @@ ENV PATH="${VENV_PATH}/bin:${PATH}"
 # Note: dev/test/lint packages optional via INSTALL_DEV for CI images
 RUN pip install -U pip && \
     pip install --no-cache-dir \
-      fastapi uvicorn[standard] pydantic pyyaml prometheus-client structlog \
+      fastapi uvicorn sse-starlette pydantic pyyaml prometheus-client structlog \
       aiofiles aiodocker circuitbreaker httpx requests jsonschema \
       python-dateutil cryptography ipaddress psutil
 
