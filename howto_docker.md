@@ -97,4 +97,79 @@ Jeremiah, if you want, I can give you a **one-line “force purge” command** t
 It’s fast, but it’s irreversible.  
 Do you want me to prepare that **safe-but-forceful purge script**?
 
+---
+### Location and usage of the `.env` file
+
+- **Place the `.env` file in the same directory as your `docker-compose.yml`** (project root). Docker Compose automatically loads this file for variable interpolation like `${MCP_VERSION}` and `${MCP_SERVER_PORT}`.
+- **Important:** Compose’s `.env` is used for interpolating values into the Compose file; it is **not automatically injected into containers** at runtime unless you explicitly pass it via `env_file` or map variables under `environment`.
+
+---
+
+### Make `.env` variables available inside the container
+
+You have two complementary options:
+
+#### Option A — Use `environment:` (already in your file)
+- This maps specific variables into the container using `${VAR}` from `.env`.
+- You’re already doing this for most MCP settings, so they will be available in the container.
+
+#### Option B — Add `env_file:` to inject the entire `.env`
+- Useful if you want all variables from `.env` inside the container without listing them individually.
+- Recommended only if you intend many of them to be accessible at runtime.
+
+Example patch for `mcp-server`:
+```yaml
+services:
+  mcp-server:
+    env_file:
+      - .env
+    environment:
+      MCP_SERVER_TRANSPORT: ${MCP_SERVER_TRANSPORT:-http}
+      MCP_SERVER_HOST: 0.0.0.0
+      MCP_SERVER_PORT: ${MCP_SERVER_PORT:-8080}
+      # ... keep the rest of your existing mappings
+```
+
+You can also add `env_file: [.env]` to `prometheus` and `grafana` if needed.
+
+---
+
+### Precedence and behavior
+
+- **Interpolation precedence:** Shell environment overrides `.env` during Compose parsing. If both set `MCP_SERVER_PORT`, the shell wins.
+- **Runtime precedence:** `environment:` entries override `env_file` values for the container.
+- **No image bake-in:** Do not copy `.env` into the image; keep it at the project root for Compose to load.
+
+---
+
+### Validation steps
+
+- **Confirm interpolation:**
+  ```bash
+  docker compose config
+  ```
+  Check that `${...}` values are resolved to your `.env` values.
+
+- **Confirm runtime env inside the container:**
+  ```bash
+  docker exec -it mcp-server env | egrep 'MCP_|PROMETHEUS_|GRAFANA_|PYTHON_VERSION'
+  ```
+
+- **Spot-check specific variables:**
+  ```bash
+  docker exec -it mcp-server bash -lc 'echo $MCP_SERVER_TRANSPORT; echo $MCP_SERVER_PORT'
+  ```
+
+---
+
+### Practical guidance
+
+- Put your `.env` at the root (same folder as `docker-compose.yml`).
+- Keep secrets out of `.env` in source control; use `.env.local` or Docker secrets for sensitive values.
+- If you rely on `.env` during `docker run`, pass it explicitly:
+  ```bash
+  docker run --env-file .env mcp-server:latest
+  ```
+  
+https://copilot.microsoft.com/shares/6XTtaeLWUjoZfATbHARSr
 https://copilot.microsoft.com/shares/q1AvRfV6kcjvFi8iSscrn
