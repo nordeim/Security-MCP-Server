@@ -158,7 +158,7 @@ check_http_deps() {
   local transport="${MCP_SERVER_TRANSPORT:-http}"
   if [[ "$(to_lower "$transport")" == "http" ]]; then
     log_info "Checking HTTP transport dependencies (FastAPI/Uvicorn)..."
-    if ! "${PY_EXEC}" - <<'PY'; then
+    if ! "${PY_EXEC}" - <<'PY'
 import importlib
 missing = []
 for m in ("fastapi", "uvicorn"):
