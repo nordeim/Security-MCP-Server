@@ -1,0 +1,44 @@
+# Safe development override: preserves entrypoint, avoids config shadowing, and uses read-only bind mounts.
+
+# Compose v2+: omit obsolete 'version' key
+
+services:
+  mcp-server:
+    # Use the same build context/image as base; cache hints are fine but not required here.
+    build:
+      context: .
+      dockerfile: Dockerfile
+      cache_from:
+        - mcp-server:latest
+
+    # Bring in the .env for convenience; base Compose already maps critical vars via `environment`.
+    env_file:
+      - .env
+
+    # Development flags (safe): do not override Python runtime env here.
+    environment:
+      DEVELOPMENT_MODE: 'true'
+      DEBUG: 'true'
+      LOG_LEVEL: DEBUG
+
+    # Bind mounts for hot iteration — read-only to prevent accidental writes.
+    # NOTE: Do NOT mount the entire ./config directory by default; it can hide baked configs.
+    volumes:
+      - ./mcp_server:/app/mcp_server:ro
+      - ./scripts:/app/scripts:ro
+      - ./tests:/app/tests:ro
+      # If you need to test a local config, mount the single file (read-only):
+      # - ./config/config.yaml:/app/config/config.yaml:ro
+
+    # Expose dev debug port without changing the command/entrypoint.
+    # This is harmless if nothing listens on 5678.
+    ports:
+      - "5678:5678"
+
+    # Keep resource limits modest; you can bump them in dev if needed.
+    # Do not change entrypoint/command — we rely on base entrypoint.
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1G
