@@ -1,0 +1,262 @@
+# Compose v2+: omit obsolete 'version' key
+
+networks:
+  mcp-public:
+    name: mcp-public
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+
+  mcp-internal:
+    name: mcp-internal
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.29.0.0/24
+
+volumes:
+  mcp-config:
+    name: mcp-config
+    driver: local
+  mcp-logs:
+    name: mcp-logs
+    driver: local
+  mcp-data:
+    name: mcp-data
+    driver: local
+  prometheus-data:
+    name: prometheus-data
+    driver: local
+  grafana-data:
+    name: grafana-data
+    driver: local
+
+services:
+  mcp-server:
+    container_name: mcp-server
+    image: mcp-server:${MCP_VERSION:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PYTHON_VERSION: ${PYTHON_VERSION:-3.12}
+      cache_from:
+        - mcp-server:latest
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+    networks:
+      - mcp-public
+      - mcp-internal
+
+    # Ensure mcp-server starts only after Prometheus is actually ready
+    depends_on:
+      prometheus:
+        condition: service_healthy
+
+    ports:
+      - "${MCP_SERVER_PORT:-8080}:8080"
+      - "${MCP_METRICS_PORT:-9090}:9090"
+
+    volumes:
+      - mcp-config:/app/config:rw
+      - mcp-logs:/app/logs:rw
+      - mcp-data:/app/data:rw
+      # Development-only bind mounts go in docker-compose.override.yml
+
+    env_file:
+      - .env
+
+    environment:
+      MCP_SERVER_TRANSPORT: ${MCP_SERVER_TRANSPORT:-http}
+      MCP_SERVER_HOST: 0.0.0.0
+      MCP_SERVER_PORT: ${MCP_SERVER_PORT:-8080}
+      TOOLS_PACKAGE: ${TOOLS_PACKAGE:-mcp_server.tools}
+      TOOL_INCLUDE: ${TOOL_INCLUDE:-}
+      TOOL_EXCLUDE: ${TOOL_EXCLUDE:-}
+      MCP_MAX_ARGS_LEN: ${MCP_MAX_ARGS_LEN:-2048}
+      MCP_MAX_STDOUT_BYTES: ${MCP_MAX_STDOUT_BYTES:-1048576}
+      MCP_MAX_STDERR_BYTES: ${MCP_MAX_STDERR_BYTES:-262144}
+      MCP_CIRCUIT_BREAKER_FAILURE_THRESHOLD: ${MCP_CIRCUIT_BREAKER_FAILURE_THRESHOLD:-5}
+      MCP_CIRCUIT_BREAKER_RECOVERY_TIMEOUT: ${MCP_CIRCUIT_BREAKER_RECOVERY_TIMEOUT:-60}
+      MCP_HEALTH_CHECK_INTERVAL: ${MCP_HEALTH_CHECK_INTERVAL:-30}
+      MCP_HEALTH_CPU_THRESHOLD: ${MCP_HEALTH_CPU_THRESHOLD:-80}
+      MCP_HEALTH_MEMORY_THRESHOLD: ${MCP_HEALTH_MEMORY_THRESHOLD:-80}
+      MCP_METRICS_ENABLED: ${MCP_METRICS_ENABLED:-true}
+      MCP_METRICS_PROMETHEUS_ENABLED: ${MCP_METRICS_PROMETHEUS_ENABLED:-true}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_FORMAT: "${LOG_FORMAT:-%(asctime)s %(levelname)s %(name)s %(message)s}"
+
+    deploy:
+      resources:
+        limits:
+          cpus: '${MCP_CPU_LIMIT:-2.0}'
+          memory: ${MCP_MEMORY_LIMIT:-1G}
+
+    # Minimal privilege hardening without breaking volumes or signals
+    security_opt:
+      - no-new-privileges:true
+
+    labels:
+      - "prometheus.io/scrape=true"
+      - "prometheus.io/port=9090"
+      - "prometheus.io/path=/metrics"
+      - "traefik.enable=true"
+      - "traefik.http.routers.mcp.rule=Host(`mcp.local`)"
+      - "traefik.http.services.mcp.loadbalancer.server.port=8080"
+
+  prometheus:
+    container_name: prometheus
+    image: prom/prometheus:${PROMETHEUS_VERSION:-v2.45.0}
+    restart: unless-stopped
+
+    networks:
+      - mcp-internal
+      - mcp-public
+
+    ports:
+      - "${PROMETHEUS_PORT:-9091}:9090"
+
+    volumes:
+      - ./docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./docker/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus:rw
+
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+      - '--storage.tsdb.retention.size=10GB'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+      - '--web.enable-lifecycle'
+      - '--web.enable-admin-api'
+
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+
+    # Use readiness endpoint for startup ordering
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9090/-/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+    labels:
+      - "prometheus.io/scrape=false"
+
+  grafana:
+    container_name: grafana
+    image: grafana/grafana:${GRAFANA_VERSION:-10.0.0}
+    restart: unless-stopped
+
+    networks:
+      - mcp-public
+      - mcp-internal
+
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+
+    volumes:
+      - grafana-data:/var/lib/grafana:rw
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
+
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_INSTALL_PLUGINS: ${GRAFANA_PLUGINS:-}
+      GF_SERVER_ROOT_URL: ${GRAFANA_ROOT_URL:-http://localhost:3000}
+      GF_ANALYTICS_REPORTING_ENABLED: 'false'
+      GF_ANALYTICS_CHECK_FOR_UPDATES: 'false'
+
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+    labels:
+      - "prometheus.io/scrape=false"
+
+  node-exporter:
+    container_name: node-exporter
+    image: prom/node-exporter:${NODE_EXPORTER_VERSION:-v1.6.0}
+    restart: unless-stopped
+
+    networks:
+      - mcp-internal
+
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 128M
+        reservations:
+          cpus: '0.1'
+          memory: 32M
+
+    labels:
+      - "prometheus.io/scrape=true"
+      - "prometheus.io/port=9100"
+
+  cadvisor:
+    container_name: cadvisor
+    image: gcr.io/cadvisor/cadvisor:${CADVISOR_VERSION:-v0.47.0}
+    restart: unless-stopped
+
+    networks:
+      - mcp-internal
+
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+
+    privileged: true
+    devices:
+      - /dev/kmsg
+
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.1'
+          memory: 64M
+
+    labels:
+      - "prometheus.io/scrape=true"
+      - "prometheus.io/port=8080"
