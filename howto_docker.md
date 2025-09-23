@@ -1,5 +1,17 @@
-Jeremiah, I’m fully aligned with your elevated framework and ready to operate at that standard.  
-Let’s approach your Docker volume removal issue with **deep analysis, phased execution, and bulletproof operational hygiene** so you can clear those volumes without collateral damage.
+### Validation checklist
+
+- Parse and merge:
+  - Run `docker compose config` and confirm the merged service:
+    - Does not override `command` or `entrypoint`.
+    - Keeps base `depends_on` and healthchecks.
+- Startup:
+  - `docker compose -f docker-compose.yml -f docker-compose.override.yml up --build -d`
+  - `docker logs -f mcp-server` should show entrypoint logs, venv Python path, HTTP deps OK, Prometheus wait, then server start.
+- Bind mounts:
+  - `docker exec -it mcp-server ls -l /app/mcp_server /app/scripts /app/tests` show content from host as read-only.
+  - Ensure `/app/config/config.yaml` exists either from image or explicit single-file mount.
+- Optional debugging:
+  - If you later enable a debug server on 0.0.0.0:5678, the port mapping is already in place.
 
 ---
 
