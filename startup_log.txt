@@ -1,0 +1,123 @@
+$ docker compose down -v
+
+$ docker compose build --no-cache mcp-server
+[+] Building 208.9s (25/25) FINISHED                                                                                                                                                                                                        
+ => [internal] load local bake definitions                                                                                                                                                                                             0.0s
+ => => reading from stdin 709B                                                                                                                                                                                                         0.0s
+ => [internal] load build definition from Dockerfile                                                                                                                                                                                   0.3s
+ => => transferring dockerfile: 4.54kB                                                                                                                                                                                                 0.0s
+ => [internal] load metadata for docker.io/library/python:3.12-slim-trixie                                                                                                                                                             2.4s
+ => [internal] load .dockerignore                                                                                                                                                                                                      0.3s
+ => => transferring context: 996B                                                                                                                                                                                                      0.0s
+ => importing cache manifest from mcp-server:latest                                                                                                                                                                                    0.0s
+ => [internal] load build context                                                                                                                                                                                                      0.3s
+ => => transferring context: 898B                                                                                                                                                                                                      0.0s
+ => CACHED [python-builder 1/6] FROM docker.io/library/python:3.12-slim-trixie@sha256:abc799c7ee22b0d66f46c367643088a35e048bbabd81212d73c2323aed38c64f                                                                                 0.0s
+ => [python-builder 2/6] RUN apt-get update && apt-get install -y --no-install-recommends     build-essential gcc python3-dev libssl-dev libffi-dev git   && rm -rf /var/lib/apt/lists/*                                             135.5s
+ => [stage-1  2/12] RUN groupadd -r mcp --gid=1000 &&     useradd -r -g mcp --uid=1000 --home-dir=/app --shell=/bin/bash mcp                                                                                                           4.9s
+ => [stage-1  3/12] RUN apt-get update && apt-get install -y --no-install-recommends     nmap masscan gobuster     curl wget ca-certificates     tini gosu   && rm -rf /var/lib/apt/lists/*                                           70.0s
+ => [python-builder 3/6] RUN python -m venv "/opt/venv"                                                                                                                                                                                8.4s 
+ => [python-builder 4/6] RUN pip install -U pip &&     pip install --no-cache-dir       fastapi uvicorn mcp[cli] sse-starlette pydantic pyyaml prometheus-client structlog       aiofiles aiodocker circuitbreaker httpx requests js  30.0s 
+ => [python-builder 5/6] RUN if [ "false" = "true" ]; then       pip install --no-cache-dir pytest pytest-asyncio pytest-cov black flake8 mypy bandit ;     fi                                                                         2.1s 
+ => [python-builder 6/6] RUN python - <<'PY'                                                                                                                                                                                           3.7s 
+ => [stage-1  4/12] COPY --from=python-builder /opt/venv /opt/venv                                                                                                                                                                     4.5s 
+ => [stage-1  5/12] RUN mkdir -p /app/config /app/logs /app/data /app/scripts &&     chown -R mcp:mcp /app &&     find /app -type d -exec chmod 750 {} + &&     find /app -type f -exec chmod 640 {} +                                 2.1s 
+ => [stage-1  6/12] WORKDIR /app                                                                                                                                                                                                       1.4s 
+ => [stage-1  7/12] COPY --chown=mcp:mcp mcp_server/ /app/mcp_server/                                                                                                                                                                  1.4s 
+ => [stage-1  8/12] COPY --chown=mcp:mcp scripts/ /app/scripts/                                                                                                                                                                        1.6s 
+ => [stage-1  9/12] COPY --chown=mcp:mcp config/ /app/config/                                                                                                                                                                          1.5s 
+ => [stage-1 10/12] COPY --chown=mcp:mcp docker/entrypoint.sh /entrypoint.sh                                                                                                                                                           1.5s 
+ => [stage-1 11/12] COPY --chown=mcp:mcp docker/healthcheck.sh /healthcheck.sh                                                                                                                                                         1.4s 
+ => [stage-1 12/12] RUN chmod -R 750 /app/scripts &&     find /app/scripts -type f -name "*.sh" -exec chmod 750 {} + &&     chmod 750 /entrypoint.sh /healthcheck.sh                                                                   2.2s
+ => exporting to image                                                                                                                                                                                                                 4.5s
+ => => exporting layers                                                                                                                                                                                                                4.1s
+ => => writing image sha256:4e5d9120f72a4d02e9f7d2836e79e00dfabfeff51e9d083c1b734e5e356d2155                                                                                                                                           0.1s
+ => => naming to docker.io/library/mcp-server:latest                                                                                                                                                                                   0.1s
+ => resolving provenance for metadata file                                                                                                                                                                                             0.0s
+[+] Building 1/1
+ ✔ mcp-server:latest  Built                                                                                                                                                                                                            0.0s 
+
+$ docker compose up --build -d prometheus grafana cadvisor node-exporter
+WARN[0000] a network with name mcp-internal exists but was not created for project "mcp-server".
+Set `external: true` to use an existing network 
+WARN[0000] a network with name mcp-public exists but was not created for project "mcp-server".
+Set `external: true` to use an existing network 
+[+] Running 6/6
+ ✔ Volume prometheus-data   Created                                                                                                                                                                                                    0.1s 
+ ✔ Volume grafana-data      Created                                                                                                                                                                                                    0.1s 
+ ✔ Container prometheus     Started                                                                                                                                                                                                    5.3s 
+ ✔ Container node-exporter  Started                                                                                                                                                                                                    3.7s 
+ ✔ Container cadvisor       Started                                                                                                                                                                                                    4.8s 
+ ✔ Container grafana        Started                                                                                                                                                                                                    5.2s 
+
+$ docker ps
+CONTAINER ID   IMAGE                              COMMAND                  CREATED          STATUS                             PORTS                                         NAMES
+32c819674af0   gcr.io/cadvisor/cadvisor:v0.47.0   "/usr/bin/cadvisor -…"   30 seconds ago   Up 26 seconds (health: starting)                                                 cadvisor
+5918fb04d84c   grafana/grafana:10.0.0             "/run.sh"                30 seconds ago   Up 26 seconds (health: starting)   0.0.0.0:3000->3000/tcp, [::]:3000->3000/tcp   grafana
+25f4145c5670   prom/prometheus:v2.45.0            "/bin/prometheus --c…"   30 seconds ago   Up 26 seconds (healthy)            0.0.0.0:9091->9090/tcp, [::]:9091->9090/tcp   prometheus
+4f0cbdd7a64c   prom/node-exporter:v1.6.0          "/bin/node_exporter …"   30 seconds ago   Up 27 seconds                                                                    node-exporter
+(venv) pete@pop-os:/Home1/project/Security-MCP-Server
+$ echo '{"jsonrpc":"2.0","id":"1","method":"list_tools","params":{}}' | docker run --rm -i     --network mcp-internal     -e MCP_SERVER_TRANSPORT=stdio     mcp-server:latest python -m mcp_server.server
+[INFO] MCP Server Docker Entrypoint
+[INFO] Validating environment...
+[INFO] Using Python executable: /opt/venv/bin/python
+[PY] Executable=/opt/venv/bin/python Version=3.12.11
+[INFO] Environment validation complete
+[INFO] Generating configuration...
+[INFO] Using existing configuration: /app/config/config.yaml
+[INFO] Checking dependencies...
+[INFO] Waiting for Prometheus readiness endpoint...
+[INFO] Prometheus is ready
+[INFO] Preflight Summary:
+[INFO]   Version: latest
+[INFO]   Environment: production
+[INFO]   Config: /app/config/config.yaml
+[INFO]   Logs: /app/logs
+[INFO]   Data: /app/data
+[INFO]   Transport: stdio
+[INFO] Dropping privileges to mcp
+2025-09-23 12:20:56,557 INFO __main__ logging.configured level=INFO
+2025-09-23 12:20:56,557 INFO __main__ tool_discovery.starting package=mcp_server.tools include=None exclude=None
+2025-09-23 12:20:56,563 INFO mcp_server.circuit_breaker circuit_breaker.created name=GobusterTool_135677824691776 threshold=4 timeout=180.0
+2025-09-23 12:20:56,563 INFO mcp_server.config config.loaded_successfully
+2025-09-23 12:20:56,564 INFO __main__ tool_discovery.tool_loaded name=GobusterTool
+2025-09-23 12:20:56,567 INFO mcp_server.circuit_breaker circuit_breaker.created name=MasscanTool_135677833363536 threshold=3 timeout=90.0
+2025-09-23 12:20:56,567 WARNING mcp_server.tools.masscan_tool masscan.config_apply_failed error='MasscanTool' object has no attribute 'config_max_rate' using_safe_defaults
+2025-09-23 12:20:56,567 INFO __main__ tool_discovery.tool_loaded name=MasscanTool
+2025-09-23 12:20:56,572 INFO mcp_server.circuit_breaker circuit_breaker.created name=NmapTool_135677822995296 threshold=5 timeout=120.0
+2025-09-23 12:20:56,572 WARNING mcp_server.tools.nmap_tool nmap.config_apply_failed error=argument of type 'NoneType' is not iterable using_safe_defaults
+2025-09-23 12:20:56,572 WARNING __main__ tool_discovery.tool_instantiation_failed name=NmapTool error=argument of type 'NoneType' is not iterable
+2025-09-23 12:20:56,572 INFO __main__ tool_discovery.completed package=mcp_server.tools modules=3 tools=2
+2025-09-23 12:20:56,572 INFO __main__ enhanced_main.starting transport=stdio tools_pkg=mcp_server.tools tools_count=2 include=None exclude=None shutdown_grace=30.0s
+2025-09-23 12:20:56,572 INFO mcp_server.circuit_breaker circuit_breaker.created name=GobusterTool_135677824691776 threshold=5 timeout=60.0
+2025-09-23 12:20:56,572 INFO __main__ tool_registry.tool_registered name=GobusterTool
+2025-09-23 12:20:56,572 INFO mcp_server.circuit_breaker circuit_breaker.created name=MasscanTool_135677833363536 threshold=3 timeout=90.0
+2025-09-23 12:20:56,572 INFO __main__ tool_registry.tool_registered name=MasscanTool
+2025-09-23 12:20:56,572 INFO mcp_server.health health_check.added name=system_resources priority=0
+2025-09-23 12:20:56,572 INFO mcp_server.health health_check.added name=process_health priority=1
+2025-09-23 12:20:56,572 INFO mcp_server.health health_check_manager.initialized checks=2 interval=30.0
+2025-09-23 12:20:56,572 ERROR __main__ mcp_server.initialization_failed error='Server' object has no attribute 'register_tool'
+2025-09-23 12:20:56,572 INFO mcp_server.health health_check.added name=tool_availability priority=2
+2025-09-23 12:20:56,573 INFO mcp_server.health health_check.added name=tool_GobusterTool priority=2
+2025-09-23 12:20:56,573 INFO mcp_server.health health_check.added name=tool_MasscanTool priority=2
+2025-09-23 12:20:56,573 INFO __main__ enhanced_server.initialized transport=stdio tools=2
+2025-09-23 12:20:56,573 INFO __main__ enhanced_main.tools_loaded tools=['GobusterTool', 'MasscanTool']
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/app/mcp_server/server.py", line 665, in <module>
+    asyncio.run(main_enhanced())
+  File "/usr/local/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/app/mcp_server/server.py", line 657, in main_enhanced
+    await server.run()
+  File "/app/mcp_server/server.py", line 570, in run
+    raise RuntimeError("stdio transport requested but MCP stdio support is unavailable")
+RuntimeError: stdio transport requested but MCP stdio support is unavailable
