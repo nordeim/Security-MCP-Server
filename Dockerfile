@@ -64,7 +64,7 @@ RUN groupadd -r mcp --gid=${MCP_GID} && \
 
 # Minimal runtime packages only
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    nmap masscan gobuster \
+    nmap masscan gobuster hydra sqlmap \
     curl wget ca-certificates \
     tini gosu \
   && rm -rf /var/lib/apt/lists/*

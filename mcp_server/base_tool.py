@@ -1,6 +1,6 @@
 """
 Enhanced MCP Base Tool with circuit breaker, metrics, and advanced error handling.
-Production-ready implementation with proper async support and validation.
+Production-ready implementation with proper async support, validation, and resource limits.
 """
 import asyncio
 import logging
@@ -11,6 +11,10 @@ import shutil
 import time
 import contextlib
 import inspect
+import threading
+import sys
+import resource
+import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
@@ -35,7 +39,7 @@ except ImportError:
                 setattr(self, k, v)
         
         def dict(self):
-            return {k: v for k, v in self.__dict__.items()}
+            return {k: v for k, v in self.__dict__.items() if not k.startswith('_')}
     
     def Field(default=None, **kwargs):
         return default
@@ -62,19 +66,32 @@ log = logging.getLogger(__name__)
 
 _DENY_CHARS = re.compile(r"[;&|`$><\n\r]")
 _TOKEN_ALLOWED = re.compile(r"^[A-Za-z0-9.:/=+-,@%_]+$")
+_HOSTNAME_PATTERN = re.compile(r'^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?$')
 _MAX_ARGS_LEN = int(os.getenv("MCP_MAX_ARGS_LEN", "2048"))
 _MAX_STDOUT_BYTES = int(os.getenv("MCP_MAX_STDOUT_BYTES", "1048576"))
 _MAX_STDERR_BYTES = int(os.getenv("MCP_MAX_STDERR_BYTES", "262144"))
 _DEFAULT_TIMEOUT_SEC = float(os.getenv("MCP_DEFAULT_TIMEOUT_SEC", "300"))
 _DEFAULT_CONCURRENCY = int(os.getenv("MCP_DEFAULT_CONCURRENCY", "2"))
+_MAX_MEMORY_MB = int(os.getenv("MCP_MAX_MEMORY_MB", "512"))
+_MAX_FILE_DESCRIPTORS = int(os.getenv("MCP_MAX_FILE_DESCRIPTORS", "256"))
+
+# Thread-safe semaphore creation lock
+_semaphore_lock = threading.Lock()
+_semaphore_registry = {}
 
 
 def _is_private_or_lab(value: str) -> bool:
-    """Check if target is private IPv4 or lab internal."""
+    """Enhanced validation with hostname format checking."""
     import ipaddress
     v = value.strip()
+    
+    # Validate .lab.internal hostname format
     if v.endswith(".lab.internal"):
+        hostname_part = v[:-len(".lab.internal")]
+        if not hostname_part or not _HOSTNAME_PATTERN.match(hostname_part):
+            return False
         return True
+    
     try:
         if "/" in v:
             net = ipaddress.ip_network(v, strict=False)
@@ -110,44 +127,45 @@ class ErrorContext:
 
 
 class ToolInput(BaseModel):
-    """Tool input model with validation."""
+    """Tool input model with enhanced validation."""
     target: str
     extra_args: str = ""
     timeout_sec: Optional[float] = None
     correlation_id: Optional[str] = None
     
-    if PYDANTIC_AVAILABLE and _PD_V2:
-        @field_validator("target")
-        @classmethod
-        def _validate_target(cls, v: str) -> str:
-            if not _is_private_or_lab(v):
-                raise ValueError("Target must be RFC1918 IPv4 or a .lab.internal hostname (CIDR allowed).")
-            return v
-        
-        @field_validator("extra_args")
-        @classmethod
-        def _validate_extra_args(cls, v: str) -> str:
-            v = v or ""
-            if len(v) > _MAX_ARGS_LEN:
-                raise ValueError(f"extra_args too long (> {_MAX_ARGS_LEN} bytes)")
-            if _DENY_CHARS.search(v):
-                raise ValueError("extra_args contains forbidden metacharacters")
-            return v
-    elif PYDANTIC_AVAILABLE:
-        @field_validator("target")
-        def _validate_target(cls, v: str) -> str:
-            if not _is_private_or_lab(v):
-                raise ValueError("Target must be RFC1918 IPv4 or a .lab.internal hostname (CIDR allowed).")
-            return v
-        
-        @field_validator("extra_args")
-        def _validate_extra_args(cls, v: str) -> str:
-            v = v or ""
-            if len(v) > _MAX_ARGS_LEN:
-                raise ValueError(f"extra_args too long (> {_MAX_ARGS_LEN} bytes)")
-            if _DENY_CHARS.search(v):
-                raise ValueError("extra_args contains forbidden metacharacters")
-            return v
+    if PYDANTIC_AVAILABLE:
+        if _PD_V2:
+            @classmethod
+            @field_validator("target", mode='after')
+            def _validate_target(cls, v: str) -> str:
+                if not _is_private_or_lab(v):
+                    raise ValueError("Target must be RFC1918 IPv4 or a .lab.internal hostname (CIDR allowed).")
+                return v
+            
+            @classmethod
+            @field_validator("extra_args", mode='after')
+            def _validate_extra_args(cls, v: str) -> str:
+                v = v or ""
+                if len(v) > _MAX_ARGS_LEN:
+                    raise ValueError(f"extra_args too long (> {_MAX_ARGS_LEN} bytes)")
+                if _DENY_CHARS.search(v):
+                    raise ValueError("extra_args contains forbidden metacharacters")
+                return v
+        else:
+            @field_validator("target")
+            def _validate_target(cls, v: str) -> str:
+                if not _is_private_or_lab(v):
+                    raise ValueError("Target must be RFC1918 IPv4 or a .lab.internal hostname (CIDR allowed).")
+                return v
+            
+            @field_validator("extra_args")
+            def _validate_extra_args(cls, v: str) -> str:
+                v = v or ""
+                if len(v) > _MAX_ARGS_LEN:
+                    raise ValueError(f"extra_args too long (> {_MAX_ARGS_LEN} bytes)")
+                if _DENY_CHARS.search(v):
+                    raise ValueError("extra_args contains forbidden metacharacters")
+                return v
 
 
 class ToolOutput(BaseModel):
@@ -171,7 +189,7 @@ class ToolOutput(BaseModel):
 
 
 class MCPBaseTool(ABC):
-    """Base class for MCP tools with enhanced features."""
+    """Enhanced base class for MCP tools with production-ready features."""
     
     command_name: ClassVar[str]
     allowed_flags: ClassVar[Optional[Sequence[str]]] = None
@@ -219,22 +237,43 @@ class MCPBaseTool(ABC):
             self._circuit_breaker = None
     
     def _ensure_semaphore(self) -> asyncio.Semaphore:
-        """Ensure semaphore exists for concurrency control."""
-        if self.__class__._semaphore is None:
-            self.__class__._semaphore = asyncio.Semaphore(self.concurrency)
-        return self.__class__._semaphore
+        """Thread-safe semaphore initialization per event loop."""
+        global _semaphore_registry
+        
+        try:
+            loop = asyncio.get_running_loop()
+            loop_id = id(loop)
+        except RuntimeError:
+            # Create new loop if needed
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop_id = id(loop)
+        
+        # Use class name as key combined with loop id
+        key = f"{self.__class__.__name__}_{loop_id}"
+        
+        with _semaphore_lock:
+            if key not in _semaphore_registry:
+                _semaphore_registry[key] = asyncio.Semaphore(self.concurrency)
+            return _semaphore_registry[key]
     
     async def run(self, inp: ToolInput, timeout_sec: Optional[float] = None) -> ToolOutput:
-        """Run tool with circuit breaker and metrics."""
+        """Run tool with circuit breaker, metrics, and resource limits."""
         start_time = time.time()
         correlation_id = inp.correlation_id or str(int(start_time * 1000))
         
+        # Record active execution
+        if self.metrics:
+            self.metrics.increment_active()
+        
         try:
+            # Check circuit breaker state
             if self._circuit_breaker:
                 state = getattr(self._circuit_breaker, 'state', None)
                 if state == getattr(CircuitBreakerState, 'OPEN', 'OPEN'):
                     return self._create_circuit_breaker_error(inp, correlation_id)
             
+            # Execute with semaphore for concurrency control
             async with self._ensure_semaphore():
                 if self._circuit_breaker:
                     if inspect.iscoroutinefunction(getattr(self._circuit_breaker, 'call', None)):
@@ -257,6 +296,11 @@ class MCPBaseTool(ABC):
                 
         except Exception as e:
             return await self._handle_execution_error(e, inp, correlation_id, start_time)
+        
+        finally:
+            # Decrement active execution
+            if self.metrics:
+                self.metrics.decrement_active()
     
     def _create_circuit_breaker_error(self, inp: ToolInput, correlation_id: str) -> ToolOutput:
         """Create error output for open circuit breaker."""
@@ -294,17 +338,20 @@ class MCPBaseTool(ABC):
             error_type = result.error_type if not success else None
             
             if hasattr(self.metrics, 'record_execution'):
-                if inspect.iscoroutinefunction(self.metrics.record_execution):
-                    await self.metrics.record_execution(
+                # Handle both sync and async versions
+                record_func = self.metrics.record_execution
+                if inspect.iscoroutinefunction(record_func):
+                    await record_func(
                         success=success,
                         execution_time=execution_time,
                         timed_out=result.timed_out,
                         error_type=error_type
                     )
                 else:
+                    # Run sync function in thread pool to avoid blocking
                     await asyncio.get_event_loop().run_in_executor(
                         None,
-                        self.metrics.record_execution,
+                        record_func,
                         success,
                         execution_time,
                         result.timed_out,
@@ -316,7 +363,7 @@ class MCPBaseTool(ABC):
     
     async def _handle_execution_error(self, e: Exception, inp: ToolInput, 
                                       correlation_id: str, start_time: float) -> ToolOutput:
-        """Handle execution errors."""
+        """Handle execution errors with detailed context."""
         execution_time = time.time() - start_time
         error_context = ErrorContext(
             error_type=ToolErrorType.EXECUTION_ERROR,
@@ -427,34 +474,68 @@ class MCPBaseTool(ABC):
         
         return safe
     
+    def _set_resource_limits(self):
+        """Set resource limits for subprocess (Unix/Linux only)."""
+        if sys.platform == 'win32':
+            return None
+        
+        def set_limits():
+            # Limit CPU time (soft, hard)
+            timeout_int = int(self.default_timeout_sec)
+            resource.setrlimit(resource.RLIMIT_CPU, (timeout_int, timeout_int + 5))
+            
+            # Limit memory
+            mem_bytes = _MAX_MEMORY_MB * 1024 * 1024
+            resource.setrlimit(resource.RLIMIT_AS, (mem_bytes, mem_bytes))
+            
+            # Limit file descriptors
+            resource.setrlimit(resource.RLIMIT_NOFILE, (_MAX_FILE_DESCRIPTORS, _MAX_FILE_DESCRIPTORS))
+            
+            # Limit core dump size to 0
+            resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+        
+        return set_limits
+    
     async def _spawn(self, cmd: Sequence[str], timeout_sec: float) -> ToolOutput:
-        """Spawn subprocess with resource limits."""
+        """Spawn subprocess with enhanced resource limits and security."""
         env = {
             "PATH": os.getenv("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"),
             "LANG": "C.UTF-8",
             "LC_ALL": "C.UTF-8",
         }
         
+        # Set resource limits function
+        preexec_fn = self._set_resource_limits() if sys.platform != 'win32' else None
+        
         try:
             log.info("tool.start command=%s timeout=%.1f", " ".join(cmd), timeout_sec)
+            
+            # Create subprocess with resource limits
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
+                preexec_fn=preexec_fn,
+                start_new_session=True,  # Isolate process group
             )
             
             try:
                 out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)
                 rc = proc.returncode
             except asyncio.TimeoutError:
+                # Kill process group
                 with contextlib.suppress(ProcessLookupError):
-                    proc.kill()
+                    if sys.platform != 'win32':
+                        import signal
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    else:
+                        proc.kill()
                     await proc.wait()
                 
                 output = ToolOutput(
                     stdout="",
-                    stderr="Process timed out",
+                    stderr=f"Process timed out after {timeout_sec}s",
                     returncode=124,
                     timed_out=True,
                     error_type=ToolErrorType.TIMEOUT.value
@@ -513,3 +594,19 @@ class MCPBaseTool(ABC):
             )
             output.ensure_metadata()
             return output
+    
+    def get_tool_info(self) -> Dict[str, Any]:
+        """Get tool information."""
+        return {
+            "name": self.tool_name,
+            "command": self.command_name,
+            "concurrency": self.concurrency,
+            "timeout": self.default_timeout_sec,
+            "circuit_breaker": {
+                "enabled": self._circuit_breaker is not None,
+                "state": self._circuit_breaker.state.name if self._circuit_breaker else "N/A"
+            },
+            "metrics": {
+                "available": self.metrics is not None
+            }
+        }

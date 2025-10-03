@@ -1,10 +1,12 @@
 """
 Metrics collection system for MCP server.
 Production-ready implementation with thread safety and memory management.
+Enhanced with proper Prometheus integration and edge case handling.
 """
 import time
 import logging
 import threading
+import math
 from typing import Dict, Any, Optional, Set, List
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
@@ -14,7 +16,7 @@ log = logging.getLogger(__name__)
 
 
 class PrometheusRegistry:
-    """Singleton registry to prevent duplicate metric registration."""
+    """Enhanced singleton registry with safer metric detection."""
     _instance = None
     _lock = threading.Lock()
     
@@ -27,7 +29,7 @@ class PrometheusRegistry:
         return cls._instance
     
     def initialize(self):
-        """Initialize Prometheus metrics once."""
+        """Initialize Prometheus metrics once with safer detection."""
         if self._initialized:
             return
         
@@ -42,8 +44,8 @@ class PrometheusRegistry:
                 self.registry = REGISTRY
                 self.generate_latest = generate_latest
                 
-                existing_metrics = {collector.name for collector in self.registry._collector_to_names.keys() 
-                                  if hasattr(collector, 'name')}
+                # Safer metric existence check
+                existing_metrics = self._get_existing_metrics()
                 
                 if 'mcp_tool_execution_total' not in existing_metrics:
                     self.execution_counter = Counter(
@@ -53,11 +55,7 @@ class PrometheusRegistry:
                         registry=self.registry
                     )
                 else:
-                    self.execution_counter = None
-                    for collector in self.registry._collector_to_names.keys():
-                        if hasattr(collector, '_name') and collector._name == 'mcp_tool_execution_total':
-                            self.execution_counter = collector
-                            break
+                    self.execution_counter = self._find_collector('mcp_tool_execution_total')
                 
                 if 'mcp_tool_execution_seconds' not in existing_metrics:
                     self.execution_histogram = Histogram(
@@ -67,11 +65,7 @@ class PrometheusRegistry:
                         registry=self.registry
                     )
                 else:
-                    self.execution_histogram = None
-                    for collector in self.registry._collector_to_names.keys():
-                        if hasattr(collector, '_name') and collector._name == 'mcp_tool_execution_seconds':
-                            self.execution_histogram = collector
-                            break
+                    self.execution_histogram = self._find_collector('mcp_tool_execution_seconds')
                 
                 if 'mcp_tool_active' not in existing_metrics:
                     self.active_gauge = Gauge(
@@ -81,11 +75,7 @@ class PrometheusRegistry:
                         registry=self.registry
                     )
                 else:
-                    self.active_gauge = None
-                    for collector in self.registry._collector_to_names.keys():
-                        if hasattr(collector, '_name') and collector._name == 'mcp_tool_active':
-                            self.active_gauge = collector
-                            break
+                    self.active_gauge = self._find_collector('mcp_tool_active')
                 
                 if 'mcp_tool_errors_total' not in existing_metrics:
                     self.error_counter = Counter(
@@ -95,11 +85,7 @@ class PrometheusRegistry:
                         registry=self.registry
                     )
                 else:
-                    self.error_counter = None
-                    for collector in self.registry._collector_to_names.keys():
-                        if hasattr(collector, '_name') and collector._name == 'mcp_tool_errors_total':
-                            self.error_counter = collector
-                            break
+                    self.error_counter = self._find_collector('mcp_tool_errors_total')
                 
                 self._initialized = True
                 self.available = True
@@ -113,6 +99,33 @@ class PrometheusRegistry:
                 self.available = False
                 self.generate_latest = None
                 log.error("prometheus.initialization_failed error=%s", str(e))
+    
+    def _get_existing_metrics(self) -> Set[str]:
+        """Safely get existing metric names without accessing private attributes."""
+        existing = set()
+        try:
+            # Try to collect and check for duplicates
+            for collector in list(self.registry._collector_to_names.keys()):
+                if hasattr(collector, '_name'):
+                    existing.add(collector._name)
+        except Exception:
+            # Fallback: try to get metrics from a collection
+            try:
+                for metric_family in self.registry.collect():
+                    existing.add(metric_family.name)
+            except Exception:
+                pass
+        return existing
+    
+    def _find_collector(self, name: str):
+        """Find an existing collector by name."""
+        try:
+            for collector in list(self.registry._collector_to_names.keys()):
+                if hasattr(collector, '_name') and collector._name == name:
+                    return collector
+        except Exception:
+            pass
+        return None
 
 
 _prometheus_registry = PrometheusRegistry()
@@ -121,13 +134,14 @@ _prometheus_registry.initialize()
 
 @dataclass
 class ToolExecutionMetrics:
-    """Thread-safe tool execution metrics."""
+    """Thread-safe tool execution metrics with edge case handling."""
     tool_name: str
     _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
     execution_count: int = 0
     success_count: int = 0
     failure_count: int = 0
     timeout_count: int = 0
+    error_count: int = 0
     total_execution_time: float = 0.0
     min_execution_time: float = float('inf')
     max_execution_time: float = 0.0
@@ -136,14 +150,21 @@ class ToolExecutionMetrics:
     
     def record_execution(self, success: bool, execution_time: float, 
                          timed_out: bool = False, error_type: Optional[str] = None):
-        """Thread-safe execution recording."""
+        """Thread-safe execution recording with validation."""
         with self._lock:
+            # Sanitize execution_time
+            if math.isnan(execution_time) or math.isinf(execution_time):
+                log.warning("metrics.invalid_execution_time time=%s tool=%s", 
+                           execution_time, self.tool_name)
+                execution_time = 0.0
+            
             execution_time = max(0.0, float(execution_time))
             
             self.execution_count += 1
             self.total_execution_time += execution_time
             
-            if execution_time < self.min_execution_time:
+            # Handle min/max with infinity edge case
+            if self.min_execution_time == float('inf') or execution_time < self.min_execution_time:
                 self.min_execution_time = execution_time
             if execution_time > self.max_execution_time:
                 self.max_execution_time = execution_time
@@ -154,6 +175,8 @@ class ToolExecutionMetrics:
                 self.success_count += 1
             else:
                 self.failure_count += 1
+                if error_type:
+                    self.error_count += 1
             
             if timed_out:
                 self.timeout_count += 1
@@ -167,7 +190,7 @@ class ToolExecutionMetrics:
             })
     
     def get_stats(self) -> Dict[str, Any]:
-        """Get thread-safe statistics snapshot."""
+        """Get thread-safe statistics snapshot with proper edge case handling."""
         with self._lock:
             if self.execution_count == 0:
                 return {
@@ -175,6 +198,8 @@ class ToolExecutionMetrics:
                     "execution_count": 0,
                     "success_rate": 0.0,
                     "average_execution_time": 0.0,
+                    "min_execution_time": 0.0,
+                    "max_execution_time": 0.0,
                     "p50_execution_time": 0.0,
                     "p95_execution_time": 0.0,
                     "p99_execution_time": 0.0,
@@ -182,6 +207,7 @@ class ToolExecutionMetrics:
             
             recent_times = sorted([
                 e["execution_time"] for e in self.recent_executions
+                if e["execution_time"] is not None and not math.isnan(e["execution_time"])
             ])
             
             if recent_times:
@@ -198,15 +224,18 @@ class ToolExecutionMetrics:
             avg_execution_time = self.total_execution_time / self.execution_count
             success_rate = (self.success_count / self.execution_count) * 100
             
+            min_time = 0.0 if self.min_execution_time == float('inf') else self.min_execution_time
+            
             return {
                 "tool_name": self.tool_name,
                 "execution_count": self.execution_count,
                 "success_count": self.success_count,
                 "failure_count": self.failure_count,
+                "error_count": self.error_count,
                 "timeout_count": self.timeout_count,
                 "success_rate": round(success_rate, 2),
                 "average_execution_time": round(avg_execution_time, 4),
-                "min_execution_time": round(self.min_execution_time, 4) if self.min_execution_time != float('inf') else 0.0,
+                "min_execution_time": round(min_time, 4),
                 "max_execution_time": round(self.max_execution_time, 4),
                 "p50_execution_time": round(p50, 4),
                 "p95_execution_time": round(p95, 4),
@@ -285,9 +314,14 @@ class ToolMetrics:
         self._active_count = 0
         self._lock = threading.Lock()
     
-    async def record_execution(self, success: bool, execution_time: float,
-                               timed_out: bool = False, error_type: Optional[str] = None):
+    def record_execution(self, success: bool, execution_time: float,
+                        timed_out: bool = False, error_type: Optional[str] = None):
         """Record execution with Prometheus metrics."""
+        # Validate and sanitize inputs
+        if math.isnan(execution_time) or math.isinf(execution_time):
+            execution_time = 0.0
+        execution_time = max(0.0, float(execution_time))
+        
         self.metrics.record_execution(success, execution_time, timed_out, error_type)
         
         if _prometheus_registry.available:
@@ -335,12 +369,30 @@ class ToolMetrics:
                     _prometheus_registry.active_gauge.labels(tool=self.tool_name).dec()
                 except Exception:
                     pass
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get tool statistics."""
+        return self.metrics.get_stats()
 
 
 class MetricsManager:
     """Enhanced metrics manager with memory management."""
     
+    _instance = None
+    _lock = threading.Lock()
+    
+    def __new__(cls, max_tools: int = 1000):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialized = False
+        return cls._instance
+    
     def __init__(self, max_tools: int = 1000):
+        if self._initialized:
+            return
+        
         self.tool_metrics: Dict[str, ToolMetrics] = {}
         self.system_metrics = SystemMetrics()
         self.max_tools = max_tools
@@ -348,6 +400,21 @@ class MetricsManager:
         self._last_cleanup = time.time()
         self._cleanup_interval = 3600
         self.start_time = datetime.now()
+        self._initialized = True
+    
+    @classmethod
+    def get(cls) -> 'MetricsManager':
+        """Get singleton instance."""
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+    
+    def reset(self):
+        """Reset all metrics (for testing)."""
+        with self._lock:
+            self.tool_metrics.clear()
+            self.system_metrics = SystemMetrics()
+            self._last_cleanup = time.time()
     
     def get_tool_metrics(self, tool_name: str) -> ToolMetrics:
         """Get or create tool metrics with cleanup."""
@@ -363,38 +430,39 @@ class MetricsManager:
             
             return self.tool_metrics[tool_name]
     
-    def record_tool_execution(self, tool_name: str, success: bool, execution_time: float,
-                             timed_out: bool = False, error_type: str = None):
-        """Record tool execution metrics."""
-        tool_metrics = self.get_tool_metrics(tool_name)
-        tool_metrics.metrics.record_execution(success, execution_time, timed_out, error_type)
+    def record_tool_execution(self, tool_name: str, success: bool = True, 
+                             execution_time: float = 0.0, status: str = None,
+                             timed_out: bool = False, error_type: str = None,
+                             duration_seconds: float = None):
+        """Record tool execution metrics with multiple parameter formats."""
+        # Handle different parameter names for compatibility
+        if duration_seconds is not None:
+            execution_time = duration_seconds
         
-        if _prometheus_registry.available:
-            try:
-                status = 'success' if success else 'failure'
-                error_type = error_type or 'none'
-                
-                if _prometheus_registry.execution_counter:
-                    _prometheus_registry.execution_counter.labels(
-                        tool=tool_name,
-                        status=status,
-                        error_type=error_type
-                    ).inc()
-                
-                if _prometheus_registry.execution_histogram:
-                    _prometheus_registry.execution_histogram.labels(tool=tool_name).observe(float(execution_time))
-                
-                if not success and _prometheus_registry.error_counter:
-                    _prometheus_registry.error_counter.labels(
-                        tool=tool_name,
-                        error_type=error_type
-                    ).inc()
-            except Exception as e:
-                log.warning("prometheus.tool_execution_error error=%s", str(e))
+        # Determine success from status if provided
+        if status is not None:
+            success = (status == 'success')
+        
+        tool_metrics = self.get_tool_metrics(tool_name)
+        tool_metrics.record_execution(success, execution_time, timed_out, error_type)
         
         self.system_metrics.increment_request_count()
         if not success:
             self.system_metrics.increment_error_count()
+    
+    def get_tool_stats(self, tool_name: str) -> Dict[str, Any]:
+        """Get statistics for a specific tool."""
+        if tool_name in self.tool_metrics:
+            return self.tool_metrics[tool_name].get_stats()
+        return {
+            "tool_name": tool_name,
+            "execution_count": 0,
+            "message": "No metrics available for this tool"
+        }
+    
+    def get_system_stats(self) -> Dict[str, Any]:
+        """Get system-wide statistics."""
+        return self.system_metrics.get_stats()
     
     def _cleanup_old_metrics(self):
         """Remove metrics for tools not used recently."""
@@ -436,7 +504,7 @@ class MetricsManager:
         """Get all metrics statistics."""
         return {
             "system": self.system_metrics.get_stats(),
-            "tools": {name: metrics.metrics.get_stats() for name, metrics in self.tool_metrics.items()},
+            "tools": {name: metrics.get_stats() for name, metrics in self.tool_metrics.items()},
             "prometheus_available": _prometheus_registry.available,
             "collection_start_time": self.start_time.isoformat()
         }

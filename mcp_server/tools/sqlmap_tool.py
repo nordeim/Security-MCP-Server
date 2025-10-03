@@ -104,27 +104,31 @@ class SqlmapTool(MCPBaseTool):
     # SQLMAP-SPECIFIC SECURITY LIMITS
     max_risk_level: int = 2  # Limit risk level to 1-2 (avoid aggressive testing)
     max_test_level: int = 3  # Limit test level to 1-3 (avoid excessive testing)
-    max_threads: int = 10    # Limit concurrent requests
     
     def __init__(self):
-        """Enhanced initialization with sqlmap-specific security setup."""
         # ORIGINAL: Call parent constructor (implicit)
         super().__init__()
-        
+
         # ENHANCED: Setup additional features
         self.config = get_config()
         self._setup_enhanced_features()
-    
+
     def _setup_enhanced_features(self):
         """Setup enhanced features for Sqlmap tool (ADDITIONAL)."""
         # Override circuit breaker settings from config if available
-        if self.config.circuit_breaker_enabled:
-            self.circuit_breaker_failure_threshold = self.config.circuit_breaker_failure_threshold
-            self.circuit_breaker_recovery_timeout = self.config.circuit_breaker_recovery_timeout
-        
+        circuit_cfg = self.config.circuit_breaker
+        if circuit_cfg:
+            failure_threshold = circuit_cfg.failure_threshold
+            if failure_threshold is not None:
+                self.circuit_breaker_failure_threshold = int(failure_threshold)
+            recovery_timeout = getattr(circuit_cfg, "recovery_timeout", None)
+            if recovery_timeout is not None:
+                self.circuit_breaker_recovery_timeout = float(recovery_timeout)
+
         # Reinitialize circuit breaker with new settings
         self._circuit_breaker = None
         self._initialize_circuit_breaker()
+
     
     async def _execute_tool(self, inp: ToolInput, timeout_sec: Optional[float] = None) -> ToolOutput:
         """
@@ -137,8 +141,19 @@ class SqlmapTool(MCPBaseTool):
             return validation_result
         
         # ENHANCED: Add sqlmap-specific security optimizations
-        secured_args = self._secure_sqlmap_args(inp.extra_args)
-        
+        try:
+            secured_args = self._secure_sqlmap_args(inp.extra_args)
+        except ValueError as exc:
+            error_context = ErrorContext(
+                error_type=ToolErrorType.VALIDATION_ERROR,
+                message=str(exc),
+                recovery_suggestion=f"Provide -u/--url with an authorized target in extra arguments. Currently, the target is {inp.target}.",
+                timestamp=self._get_timestamp(),
+                tool_name=self.tool_name,
+                target=inp.target
+            )
+            return self._create_error_output(error_context, inp.correlation_id)
+
         # Create enhanced input with security measures
         enhanced_input = ToolInput(
             target=inp.target,
@@ -328,9 +343,7 @@ class SqlmapTool(MCPBaseTool):
         
         # Ensure required flags are present
         if not has_url:
-            # Add default URL if not specified
-            secured.extend(["-u", "http://192.168.1.10/test.php?id=1"])
-            log.warning("sqlmap.no_url_specified using_default")
+            raise ValueError("SQLmap requires -u/--url pointing to an authorized target")
         
         if not has_batch:
             # Ensure batch mode is enabled

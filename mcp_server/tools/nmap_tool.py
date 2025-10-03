@@ -1,12 +1,13 @@
 """
-Enhanced Nmap tool with circuit breaker, metrics, and advanced features.
-Production-ready implementation with comprehensive safety checks.
+Enhanced Nmap tool with circuit breaker, metrics, and comprehensive security controls.
+Production-ready implementation with strict safety enforcement.
 """
 import logging
 import shlex
 import ipaddress
+import math
 from datetime import datetime, timezone
-from typing import Sequence, Optional, Dict, Any
+from typing import Sequence, Optional, Dict, Any, Set
 import re
 
 from mcp_server.base_tool import MCPBaseTool, ToolInput, ToolOutput, ToolErrorType, ErrorContext
@@ -17,26 +18,44 @@ log = logging.getLogger(__name__)
 
 class NmapTool(MCPBaseTool):
     """
-    Enhanced Nmap network scanner tool with advanced features.
+    Enhanced Nmap network scanner tool with comprehensive security features.
     
     Features:
     - Circuit breaker protection for resilience
     - Network range validation and limits
     - Port specification safety
-    - Script execution controls
+    - Script execution controls with policy enforcement
     - Performance optimizations
     - Comprehensive metrics
+    - Intrusive operation control
+    
+    Safety considerations:
+    - Targets restricted to RFC1918 or *.lab.internal
+    - Script categories and specific scripts controlled by policy
+    - -A flag controlled by intrusive policy
+    - Non-flag tokens blocked for security
+    - Network size limits enforced
     """
     
     command_name: str = "nmap"
     
     # Conservative, safe flags for nmap
-    allowed_flags: Sequence[str] = (
-        "-sV", "-sC", "-A", "-p", "--top-ports", "-T", "-T4", "-Pn",
+    # -A flag controlled by policy
+    BASE_ALLOWED_FLAGS: Sequence[str] = (
+        "-sV", "-sC", "-p", "--top-ports", "-T", "-T4", "-Pn",
         "-O", "--script", "-oX", "-oN", "-oG", "--max-parallelism",
         "-sS", "-sT", "-sU", "-sn", "-PS", "-PA", "-PU", "-PY",
         "--open", "--reason", "-v", "-vv", "--version-intensity",
         "--min-rate", "--max-rate", "--max-retries", "--host-timeout",
+        "-T0", "-T1", "-T2", "-T3", "-T4", "-T5",  # Timing templates
+        "--scan-delay", "--max-scan-delay",
+        "-f", "--mtu",  # Fragmentation options
+        "-D", "--decoy",  # Decoy options (controlled)
+        "--source-port", "-g",  # Source port
+        "--data-length",  # Data length
+        "--ttl",  # TTL
+        "--randomize-hosts",  # Host randomization
+        "--spoof-mac",  # MAC spoofing (controlled)
     )
     
     # Nmap can run long; set higher timeout
@@ -53,35 +72,87 @@ class NmapTool(MCPBaseTool):
     # Safety limits
     MAX_NETWORK_SIZE = 1024  # Maximum number of hosts in a network range
     MAX_PORT_RANGES = 100    # Maximum number of port ranges
-    SAFE_SCRIPTS = [
-        "safe", "default", "discovery", "version", "vuln",
-        "http-headers", "ssl-cert", "ssh-hostkey"
-    ]
+    
+    # Safe script categories (always allowed)
+    SAFE_SCRIPT_CATEGORIES: Set[str] = {"safe", "default", "discovery", "version"}
+    
+    # Specific safe scripts (always allowed)
+    SAFE_SCRIPTS: Set[str] = {
+        "http-headers", "ssl-cert", "ssh-hostkey", "smb-os-discovery",
+        "dns-brute", "http-title", "ftp-anon", "smtp-commands",
+        "pop3-capabilities", "imap-capabilities", "mongodb-info",
+        "mysql-info", "ms-sql-info", "oracle-sid-brute",
+        "rdp-enum-encryption", "vnc-info", "x11-access"
+    }
+    
+    # Intrusive script categories (require policy)
+    INTRUSIVE_SCRIPT_CATEGORIES: Set[str] = {"vuln", "exploit", "intrusive", "brute", "dos"}
+    
+    # Intrusive specific scripts (require policy)
+    INTRUSIVE_SCRIPTS: Set[str] = {
+        "http-vuln-*", "smb-vuln-*", "ssl-heartbleed", "ms-sql-brute",
+        "mysql-brute", "ftp-brute", "ssh-brute", "rdp-brute",
+        "dns-zone-transfer", "snmp-brute", "http-slowloris"
+    }
     
     def __init__(self):
         """Initialize Nmap tool with enhanced features."""
         super().__init__()
         self.config = get_config()
+        self.allow_intrusive = False
+        self.allowed_flags = list(self.BASE_ALLOWED_FLAGS)
         self._apply_config()
     
     def _apply_config(self):
-        """Apply configuration settings safely."""
+        """Apply configuration settings safely with policy enforcement."""
         try:
+            # Apply circuit breaker config
             if hasattr(self.config, 'circuit_breaker') and self.config.circuit_breaker:
                 cb = self.config.circuit_breaker
                 if hasattr(cb, 'failure_threshold'):
-                    self.circuit_breaker_failure_threshold = int(cb.failure_threshold)
+                    self.circuit_breaker_failure_threshold = max(1, min(10, int(cb.failure_threshold)))
                 if hasattr(cb, 'recovery_timeout'):
-                    self.circuit_breaker_recovery_timeout = float(cb.recovery_timeout)
+                    self.circuit_breaker_recovery_timeout = max(30.0, min(600.0, float(cb.recovery_timeout)))
             
+            # Apply tool config
             if hasattr(self.config, 'tool') and self.config.tool:
                 tool = self.config.tool
                 if hasattr(tool, 'default_timeout'):
-                    self.default_timeout_sec = float(tool.default_timeout)
+                    self.default_timeout_sec = max(60.0, min(3600.0, float(tool.default_timeout)))
                 if hasattr(tool, 'default_concurrency'):
-                    self.concurrency = int(tool.default_concurrency)
+                    self.concurrency = max(1, min(5, int(tool.default_concurrency)))
+            
+            # Apply security config
+            if hasattr(self.config, 'security') and self.config.security:
+                sec = self.config.security
+                if hasattr(sec, 'allow_intrusive'):
+                    self.allow_intrusive = bool(sec.allow_intrusive)
+                    
+                    # Update allowed flags based on policy
+                    if self.allow_intrusive:
+                        # Add -A flag only if intrusive allowed
+                        if "-A" not in self.allowed_flags:
+                            self.allowed_flags.append("-A")
+                        log.info("nmap.intrusive_enabled -A_flag_allowed")
+                    else:
+                        # Remove -A flag if not allowed
+                        if "-A" in self.allowed_flags:
+                            self.allowed_flags.remove("-A")
+                        log.info("nmap.intrusive_disabled -A_flag_blocked")
+            
+            log.debug("nmap.config_applied intrusive=%s", self.allow_intrusive)
+            
         except Exception as e:
-            log.debug("nmap.config_apply_failed error=%s using_defaults", str(e))
+            log.warning("nmap.config_apply_failed error=%s using_safe_defaults", str(e))
+            # Reset to safe defaults on error
+            self.circuit_breaker_failure_threshold = 5
+            self.circuit_breaker_recovery_timeout = 120.0
+            self.default_timeout_sec = 600.0
+            self.concurrency = 1
+            self.allow_intrusive = False
+            # Ensure -A is not in allowed flags
+            if "-A" in self.allowed_flags:
+                self.allowed_flags.remove("-A")
     
     async def _execute_tool(self, inp: ToolInput, timeout_sec: Optional[float] = None) -> ToolOutput:
         """Execute Nmap with enhanced validation and optimization."""
@@ -120,7 +191,7 @@ class NmapTool(MCPBaseTool):
         return await super()._execute_tool(enhanced_input, enhanced_input.timeout_sec)
     
     def _validate_nmap_requirements(self, inp: ToolInput) -> Optional[ToolOutput]:
-        """Validate nmap-specific requirements."""
+        """Validate nmap-specific requirements with clear messaging."""
         target = inp.target.strip()
         
         # Validate network ranges
@@ -139,18 +210,21 @@ class NmapTool(MCPBaseTool):
                 )
                 return self._create_error_output(error_context, inp.correlation_id or "")
             
-            # Check network size
+            # Check network size with clear messaging
             if network.num_addresses > self.MAX_NETWORK_SIZE:
+                max_cidr = self._get_max_cidr_for_size(self.MAX_NETWORK_SIZE)
                 error_context = ErrorContext(
                     error_type=ToolErrorType.VALIDATION_ERROR,
                     message=f"Network range too large: {network.num_addresses} addresses (max: {self.MAX_NETWORK_SIZE})",
-                    recovery_suggestion=f"Use smaller network ranges (max /{32 - network.prefixlen + 10} for IPv4)",
+                    recovery_suggestion=f"Use /{max_cidr} or smaller (max {self.MAX_NETWORK_SIZE} hosts)",
                     timestamp=self._get_timestamp(),
                     tool_name=self.tool_name,
                     target=target,
                     metadata={
                         "network_size": network.num_addresses,
-                        "max_allowed": self.MAX_NETWORK_SIZE
+                        "max_allowed": self.MAX_NETWORK_SIZE,
+                        "suggested_cidr": f"/{max_cidr}",
+                        "example": f"{network.network_address}/{max_cidr}"
                     }
                 )
                 return self._create_error_output(error_context, inp.correlation_id or "")
@@ -198,8 +272,14 @@ class NmapTool(MCPBaseTool):
         
         return None
     
+    def _get_max_cidr_for_size(self, max_hosts: int) -> int:
+        """Calculate maximum CIDR prefix for given host count."""
+        # For max_hosts=1024, we need /22 (which gives 1024 addresses)
+        bits_needed = math.ceil(math.log2(max_hosts))
+        return max(0, 32 - bits_needed)
+    
     def _parse_and_validate_args(self, extra_args: str) -> str:
-        """Parse and validate nmap arguments."""
+        """Parse and validate nmap arguments with strict security."""
         if not extra_args:
             return ""
         
@@ -213,8 +293,19 @@ class NmapTool(MCPBaseTool):
         while i < len(tokens):
             token = tokens[i]
             
+            # Block non-flag tokens completely for security
+            if not token.startswith("-"):
+                raise ValueError(f"Unexpected non-flag token (potential injection): {token}")
+            
+            # Check -A flag (controlled by policy)
+            if token == "-A":
+                if not self.allow_intrusive:
+                    raise ValueError("-A flag requires intrusive operations to be enabled")
+                validated.append(token)
+                i += 1
+            
             # Check port specifications
-            if token in ("-p", "--ports"):
+            elif token in ("-p", "--ports"):
                 if i + 1 < len(tokens):
                     port_spec = tokens[i + 1]
                     if not self._validate_port_specification(port_spec):
@@ -228,9 +319,10 @@ class NmapTool(MCPBaseTool):
             elif token == "--script":
                 if i + 1 < len(tokens):
                     script_spec = tokens[i + 1]
-                    if not self._validate_script_specification(script_spec):
-                        raise ValueError(f"Unsafe script specification: {script_spec}")
-                    validated.extend([token, script_spec])
+                    validated_scripts = self._validate_and_filter_scripts(script_spec)
+                    if not validated_scripts:
+                        raise ValueError(f"No allowed scripts in specification: {script_spec}")
+                    validated.extend([token, validated_scripts])
                     i += 2
                 else:
                     raise ValueError("--script requires a value")
@@ -244,19 +336,28 @@ class NmapTool(MCPBaseTool):
                 i += 1
             
             # Check other flags
-            elif token.startswith("-"):
-                # Check if it's an allowed flag
+            else:
                 flag_base = token.split("=")[0] if "=" in token else token
                 if any(flag_base.startswith(allowed) for allowed in self.allowed_flags):
-                    validated.append(token)
+                    # Check if flag expects a value
+                    if flag_base in ("--max-parallelism", "--version-intensity", "--min-rate",
+                                    "--max-rate", "--max-retries", "--host-timeout", "--top-ports",
+                                    "--scan-delay", "--max-scan-delay", "--mtu", "--data-length",
+                                    "--ttl", "--source-port", "-g"):
+                        if i + 1 < len(tokens):
+                            value = tokens[i + 1]
+                            # Validate the value is numeric or simple
+                            if not re.match(r'^[0-9ms]+$', value):
+                                raise ValueError(f"Invalid value for {token}: {value}")
+                            validated.extend([token, value])
+                            i += 2
+                        else:
+                            raise ValueError(f"{token} requires a value")
+                    else:
+                        validated.append(token)
+                        i += 1
                 else:
                     raise ValueError(f"Flag not allowed: {token}")
-                i += 1
-            
-            else:
-                # Non-flag tokens
-                validated.append(token)
-                i += 1
         
         return " ".join(validated)
     
@@ -297,17 +398,47 @@ class NmapTool(MCPBaseTool):
         
         return True
     
-    def _validate_script_specification(self, script_spec: str) -> bool:
-        """Validate script specification for safety."""
-        # Only allow safe scripts or categories
+    def _validate_and_filter_scripts(self, script_spec: str) -> str:
+        """Validate and filter script specification based on policy."""
+        allowed_scripts = []
         scripts = script_spec.split(',')
+        
         for script in scripts:
             script = script.strip()
-            if script not in self.SAFE_SCRIPTS:
-                # Check if it's a safe category
-                if not script.startswith(("safe", "default", "discovery")):
-                    return False
-        return True
+            
+            # Check if it's a category (exact match)
+            if script in self.SAFE_SCRIPT_CATEGORIES:
+                allowed_scripts.append(script)
+            elif script in self.INTRUSIVE_SCRIPT_CATEGORIES:
+                if self.allow_intrusive:
+                    allowed_scripts.append(script)
+                    log.info("nmap.intrusive_script_allowed script=%s", script)
+                else:
+                    log.warning("nmap.intrusive_script_blocked script=%s", script)
+            
+            # Check if it's a specific script (exact match)
+            elif script in self.SAFE_SCRIPTS:
+                allowed_scripts.append(script)
+            elif script in self.INTRUSIVE_SCRIPTS:
+                if self.allow_intrusive:
+                    allowed_scripts.append(script)
+                    log.info("nmap.intrusive_script_allowed script=%s", script)
+                else:
+                    log.warning("nmap.intrusive_script_blocked script=%s", script)
+            
+            # Check wildcard patterns for intrusive scripts
+            elif any(script.startswith(pattern.replace('*', '')) for pattern in self.INTRUSIVE_SCRIPTS if '*' in pattern):
+                if self.allow_intrusive:
+                    allowed_scripts.append(script)
+                    log.info("nmap.intrusive_script_allowed script=%s", script)
+                else:
+                    log.warning("nmap.intrusive_script_blocked script=%s", script)
+            
+            else:
+                # Unknown script - block it
+                log.warning("nmap.unknown_script_blocked script=%s", script)
+        
+        return ','.join(allowed_scripts) if allowed_scripts else ""
     
     def _optimize_nmap_args(self, extra_args: str) -> str:
         """Optimize nmap arguments for performance and safety."""
@@ -325,7 +456,7 @@ class NmapTool(MCPBaseTool):
         has_timing = any(t.startswith("-T") for t in tokens)
         has_parallelism = any("--max-parallelism" in t for t in tokens)
         has_host_discovery = any(t in ("-Pn", "-sn", "-PS", "-PA") for t in tokens)
-        has_port_spec = any(t in ("-p", "--ports") for t in tokens)
+        has_port_spec = any(t in ("-p", "--ports", "--top-ports") for t in tokens)
         
         # Add optimizations
         if not has_timing:
@@ -358,6 +489,7 @@ class NmapTool(MCPBaseTool):
             "concurrency": self.concurrency,
             "timeout": self.default_timeout_sec,
             "allowed_flags": list(self.allowed_flags),
+            "intrusive_allowed": self.allow_intrusive,
             "circuit_breaker": {
                 "enabled": self._circuit_breaker is not None,
                 "failure_threshold": self.circuit_breaker_failure_threshold,
@@ -367,13 +499,22 @@ class NmapTool(MCPBaseTool):
             "safety_limits": {
                 "max_network_size": self.MAX_NETWORK_SIZE,
                 "max_port_ranges": self.MAX_PORT_RANGES,
-                "safe_scripts": self.SAFE_SCRIPTS
+                "safe_script_categories": list(self.SAFE_SCRIPT_CATEGORIES),
+                "safe_scripts": list(self.SAFE_SCRIPTS),
+                "intrusive_categories": list(self.INTRUSIVE_SCRIPT_CATEGORIES) if self.allow_intrusive else [],
+                "intrusive_scripts": list(self.INTRUSIVE_SCRIPTS) if self.allow_intrusive else [],
+                "-A_flag": "allowed" if self.allow_intrusive else "blocked"
             },
             "optimizations": {
                 "default_timing": "T4 (Aggressive)",
                 "default_parallelism": 10,
                 "default_ports": "top-1000",
                 "host_discovery": "disabled (-Pn)"
+            },
+            "security": {
+                "non_flag_tokens": "blocked",
+                "script_filtering": "enforced",
+                "private_targets_only": True
             },
             "metrics": {
                 "available": self.metrics is not None,

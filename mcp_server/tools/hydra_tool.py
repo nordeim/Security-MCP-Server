@@ -106,12 +106,12 @@ class HydraTool(MCPBaseTool):
     allowed_services: Sequence[str] = [
         "ssh", "ftp", "telnet", "http", "https", "smb", "ldap", "rdp", "mysql", "postgresql", "vnc"
     ]
-    
+
     def __init__(self):
         """Enhanced initialization with hydra-specific security setup."""
         # ORIGINAL: Call parent constructor (implicit)
         super().__init__()
-        
+
         # ENHANCED: Setup additional features
         self.config = get_config()
         self._setup_enhanced_features()
@@ -119,27 +119,26 @@ class HydraTool(MCPBaseTool):
     def _setup_enhanced_features(self):
         """Setup enhanced features for Hydra tool (ADDITIONAL)."""
         # Override circuit breaker settings from config if available
-        if self.config.circuit_breaker_enabled:
-            self.circuit_breaker_failure_threshold = self.config.circuit_breaker_failure_threshold
-            self.circuit_breaker_recovery_timeout = self.config.circuit_breaker_recovery_timeout
-        
-        # Reinitialize circuit breaker with new settings
+        circuit_cfg = getattr(self.config, "circuit_breaker", None)
+        if circuit_cfg:
+            failure_threshold = getattr(circuit_cfg, "failure_threshold", None)
+            if failure_threshold is not None:
+                self.circuit_breaker_failure_threshold = int(failure_threshold)
+            recovery_timeout = getattr(circuit_cfg, "recovery_timeout", None)
+            if recovery_timeout is not None:
+                self.circuit_breaker_recovery_timeout = float(recovery_timeout)
         self._circuit_breaker = None
         self._initialize_circuit_breaker()
     
     async def _execute_tool(self, inp: ToolInput, timeout_sec: Optional[float] = None) -> ToolOutput:
-        """
-        Enhanced tool execution with hydra-specific security validations.
-        Uses original _spawn method internally.
-        """
+        """Enhanced tool execution with hydra-specific security validations."""
         # ENHANCED: Validate hydra-specific requirements
         validation_result = self._validate_hydra_requirements(inp)
         if validation_result:
             return validation_result
-        
         # ENHANCED: Add hydra-specific security optimizations
         secured_args = self._secure_hydra_args(inp.extra_args)
-        
+
         # Create enhanced input with security measures
         enhanced_input = ToolInput(
             target=inp.target,
@@ -147,7 +146,7 @@ class HydraTool(MCPBaseTool):
             timeout_sec=timeout_sec or self.default_timeout_sec,
             correlation_id=inp.correlation_id
         )
-        
+
         # ORIGINAL: Use parent _execute_tool method which calls _spawn
         return await super()._execute_tool(enhanced_input, timeout_sec)
     
@@ -270,9 +269,9 @@ class HydraTool(MCPBaseTool):
         i = 0
         while i < len(args):
             arg = args[i]
-            
+
             # Login specification
-            elif arg in ("-l", "-L"):
+            if arg in ("-l", "-L"):
                 if i + 1 < len(args):
                     login_spec = args[i + 1]
                     if self._is_safe_login_spec(login_spec, arg == "-L"):

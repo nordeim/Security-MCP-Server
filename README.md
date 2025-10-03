@@ -76,27 +76,57 @@ In modern security operations, teams struggle with:
 
 ## 🚀 **Quick Start**
 
-### **Option 1: Docker (Recommended)**
+### **Option 0: Guided Launcher Script (New!)**
 
 ```bash
 # Clone the repository
 git clone https://github.com/nordeim/Security-MCP-Server.git
 cd Security-MCP-Server
 
-# Copy environment template
+# Make the launcher executable (one-time)
+chmod +x scripts/mcp_server_launcher.sh
+
+# Launch with all dependencies auto-installed (requires sudo)
+sudo scripts/mcp_server_launcher.sh
+
+# Verify health from another shell
+curl http://localhost:8080/health
+```
+
+The `scripts/mcp_server_launcher.sh` helper will:
+
+- **Install OS packages** via `apt-get` (`gobuster`, `hydra`, `masscan`, `nmap`, `sqlmap`, Python tooling, etc.).
+- **Create or reuse** a virtual environment at `/opt/venv`.
+- **Install Python libraries** (`model-context-protocol`, `fastapi`, `uvicorn`, `sse-starlette`, `prometheus-client`, `requests`).
+- **Export environment variables** (`MCP_SERVER_TRANSPORT=http`, `MCP_SERVER_HOST=0.0.0.0`, `MCP_SERVER_PORT=8080`).
+- **Start the MCP server** using `python -m mcp_server.server`.
+
+### **Option 1: Docker (Recommended for macOS/Windows)**
+
+```bash
+# Clone the repository
+git clone https://github.com/nordeim/Security-MCP-Server.git
+cd Security-MCP-Server
+
+# Copy environment template (optional overrides)
 cp .env.docker .env
 
-# Start the full stack
-docker-compose up -d
+# Build the image (bundles nmap, masscan, gobuster, hydra, sqlmap)
+docker compose build mcp-server
 
-# Check health
+# Launch the observability stack + server
+docker compose up -d
+
+# Check health from the host
 curl http://localhost:8080/health
 
-# Execute a tool
+# Trigger a sample tool execution (Nmap)
 curl -X POST http://localhost:8080/tools/NmapTool/execute \
   -H "Content-Type: application/json" \
   -d '{"target": "192.168.1.1", "extra_args": "-sV"}'
 ```
+
+> 💡 Re-run `docker compose build` whenever the Python code or Docker prerequisites change. See `start-docker.md` for additional compose profiles (development vs. production).
 
 ### **Option 2: Local Installation**
 
@@ -109,12 +139,13 @@ cd Security-MCP-Server
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
-# Install dependencies
-pip install -r requirements.txt
-
-# Install security tools
+# Install required security tool binaries
 sudo apt-get update
-sudo apt-get install -y nmap masscan gobuster
+sudo apt-get install -y gobuster hydra masscan nmap sqlmap
+
+# Install Python dependencies (plus optional extras for HTTP transport)
+pip install -r requirements.txt
+pip install model-context-protocol fastapi uvicorn sse-starlette prometheus-client
 
 # Configure environment
 cp .env.example .env
@@ -123,6 +154,21 @@ cp .env.example .env
 # Run the server
 python -m mcp_server.server
 ```
+
+### **External Tool & Library Requirements**
+
+
+| Path | Description |
+|------|-------------|
+| `scripts/mcp_server_launcher.sh` | Turnkey launcher that installs OS/Python deps, sets env vars, and starts the server in HTTP mode. |
+| `mcp.json` | MCP configuration consumed by coding agents (e.g., Claude Code) pointing to the launcher entrypoint. |
+| `Dockerfile` | Multi-stage build bundling MCP runtime, security tool binaries (`nmap`, `masscan`, `gobuster`, `hydra`, `sqlmap`), and entry scripts. |
+| `docker/entrypoint.sh` | Hardened container entrypoint that validates dependencies, generates config, and execs the server. |
+| `docker-compose.yml` / `docker-compose.override.yml` | Compose stack for MCP server + Prometheus/Grafana observability and optional dev overrides. |
+| `mcp_server/server.py` | Core FastAPI-based server startup, transport wiring, and health/metrics initialization. |
+| `mcp_server/tools/` | Collection of tool wrappers (`GobusterTool`, `HydraTool`, `MasscanTool`, `NmapTool`, `SqlmapTool`) with safety policies. |
+| `mcp_client.py` / `mcp_stdio_client.py` | Example clients for exercising HTTP and stdio transports respectively. |
+| `docs/` | Project documentation (architecture overviews, sub-plans, remediation notes, README makeover plan). |
 
 ---
 
@@ -181,6 +227,24 @@ graph TB
     
     style ES fill:#f9f,stroke:#333,stroke-width:4px
     style CB fill:#bbf,stroke:#333,stroke-width:2px
+```
+
+### **Application Logic Flow**
+
+```mermaid
+flowchart LR
+    Client[Client / Coding Agent] --> Transport{Transport Layer\nHTTP or stdio}
+    Transport --> Router[FastAPI Router]
+    Router --> Registry[Tool Registry]
+    Registry --> Executor[MCPBaseTool Executor]
+    Executor --> Subprocess[Secure Subprocess Runner]
+    Subprocess -->|stdout/stderr| Executor
+    Executor --> Metrics[Prometheus Metrics]
+    Executor --> Health[Health Check Aggregator]
+    Metrics --> Observability[Prometheus / Grafana]
+    Health --> HealthAPI[/health Endpoint]
+    Executor --> Response[API Response]
+    Response --> Client
 ```
 
 ### **Available Tools**
@@ -347,6 +411,16 @@ health:
 
 ---
 
+---
+
+## 🤖 **AI Coding Agent Integration**
+
+- **Configuration**: Import `mcp.json` in your coding agent to point at `scripts/mcp_server_launcher.sh`.
+- **Prerequisites**: The launcher must be executable (`chmod +x scripts/mcp_server_launcher.sh`) and runnable with elevated privileges when prompted.
+- **Workflow**: Agents can call `/health`, list tools, and execute commands using the prompts from the User Guide. SSE support is available via `/events` for streaming updates.
+
+---
+
 ## 🔐 **Security**
 
 ### **Security Features**
@@ -431,6 +505,25 @@ spec:
 ### **AWS ECS**
 
 See [deployment/aws-ecs](deployment/aws-ecs) for CloudFormation templates and task definitions.
+
+-
+## 🧩 **Extending the Tool Collection**
+
+1. **Create the tool wrapper**
+   - Start from `mcp_server/base_tool.py` or an existing implementation in `mcp_server/tools/`.
+   - Define `command_name`, allowed flags, concurrency defaults, and override `_execute_tool()` for custom behavior.
+
+2. **Register the tool**
+   - Ensure the new class resides in `mcp_server/tools/` and is imported by the package `__init__.py` so discovery picks it up.
+   - Update configuration or allowlists if your deployment uses `TOOL_INCLUDE` / `TOOL_EXCLUDE` environment variables.
+
+3. **Validate safety controls**
+   - Implement input validation (target restrictions, flag filtering) and wire circuit-breaker settings via `get_config()` like other tools.
+   - Add any required external binaries to `scripts/mcp_server_launcher.sh` and the `Dockerfile` so health checks pass.
+
+4. **Document and test**
+   - Update the README tool table and `docs/` entries with the new tool’s capabilities.
+   - Run `python3 mcp_client.py` and `curl /health` to confirm availability, then add Prometheus alert coverage if needed.
 
 ---
 

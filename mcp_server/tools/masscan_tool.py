@@ -1,6 +1,6 @@
 """
-Enhanced Masscan tool with circuit breaker, metrics, and safety features.
-Production-ready implementation with comprehensive network safety.
+Enhanced Masscan tool with circuit breaker, metrics, and comprehensive safety features.
+Production-ready implementation with strict security controls.
 """
 import logging
 import shlex
@@ -8,6 +8,7 @@ import ipaddress
 from datetime import datetime, timezone
 from typing import Sequence, Optional, Dict, Any
 import re
+import math
 
 from mcp_server.base_tool import MCPBaseTool, ToolInput, ToolOutput, ToolErrorType, ErrorContext
 from mcp_server.config import get_config
@@ -21,9 +22,10 @@ class MasscanTool(MCPBaseTool):
     
     Features:
     - Circuit breaker protection for network resilience
-    - Rate limiting enforcement
+    - Rate limiting enforcement with config-based controls
     - Large network range support with safety checks
     - Interface and routing validation
+    - Banner grabbing control based on intrusive policy
     - Performance monitoring and metrics
     
     Safety considerations:
@@ -31,6 +33,7 @@ class MasscanTool(MCPBaseTool):
     - Conservative flag subset to prevent misuse
     - Rate limiting to prevent network flooding
     - Single concurrency to manage resource usage
+    - Non-flag tokens blocked for security
     """
     
     command_name: str = "masscan"
@@ -41,7 +44,7 @@ class MasscanTool(MCPBaseTool):
         "--rate",                     # Rate limiting (critical for safety)
         "-e", "--interface",          # Interface specification
         "--wait",                     # Wait between packets
-        "--banners",                  # Banner grabbing
+        "--banners",                  # Banner grabbing (controlled by policy)
         "--router-ip",                # Router IP specification
         "--router-mac",               # Router MAC specification
         "--source-ip",                # Source IP specification
@@ -54,6 +57,9 @@ class MasscanTool(MCPBaseTool):
         "--connection-timeout",       # Connection timeout
         "--ping",                     # Ping probe
         "--retries",                  # Retry count
+        "--adapter-ip",               # Adapter IP
+        "--adapter-mac",              # Adapter MAC
+        "--ttl",                      # TTL value
     )
     
     # Masscan-specific settings
@@ -68,32 +74,59 @@ class MasscanTool(MCPBaseTool):
     # Safety limits
     MAX_NETWORK_SIZE = 65536     # Maximum /16 network
     DEFAULT_RATE = 1000           # Default packets per second
-    MAX_RATE = 100000             # Maximum allowed rate
+    MAX_RATE = 100000             # Maximum allowed rate (can be overridden by config)
     MIN_RATE = 100                # Minimum rate for safety
-    DEFAULT_WAIT = 0              # Default wait between packets (seconds)
     
     def __init__(self):
         """Initialize Masscan tool with enhanced features."""
         super().__init__()
         self.config = get_config()
+        # Attributes referenced during configuration
+        self.allow_intrusive = False
+        self.config_max_rate = self.MAX_RATE
         self._apply_config()
-    
+
     def _apply_config(self):
         """Apply configuration settings safely."""
         try:
-            if hasattr(self.config, 'circuit_breaker') and self.config.circuit_breaker:
-                cb = self.config.circuit_breaker
-                if hasattr(cb, 'failure_threshold'):
-                    self.circuit_breaker_failure_threshold = int(cb.failure_threshold)
-                if hasattr(cb, 'recovery_timeout'):
-                    self.circuit_breaker_recovery_timeout = float(cb.recovery_timeout)
-            
-            if hasattr(self.config, 'tool') and self.config.tool:
-                tool = self.config.tool
-                if hasattr(tool, 'default_timeout'):
-                    self.default_timeout_sec = float(tool.default_timeout)
+            # Apply circuit breaker config
+            cb = getattr(self.config, 'circuit_breaker', None)
+            if cb:
+                failure_threshold = getattr(cb, 'failure_threshold', None)
+                if failure_threshold is not None:
+                    self.circuit_breaker_failure_threshold = max(1, min(10, int(failure_threshold)))
+                recovery_timeout = getattr(cb, 'recovery_timeout', None)
+                if recovery_timeout is not None:
+                    self.circuit_breaker_recovery_timeout = max(30.0, min(300.0, float(recovery_timeout)))
+
+            # Apply tool config
+            tool_cfg = getattr(self.config, 'tool', None)
+            if tool_cfg:
+                default_timeout = getattr(tool_cfg, 'default_timeout', None)
+                if default_timeout is not None:
+                    self.default_timeout_sec = max(60.0, min(1800.0, float(default_timeout)))
+
+            # Apply security config
+            sec_cfg = getattr(self.config, 'security', None)
+            if sec_cfg:
+                if hasattr(sec_cfg, 'allow_intrusive'):
+                    self.allow_intrusive = bool(sec_cfg.allow_intrusive)
+
+                max_scan_rate = getattr(sec_cfg, 'max_scan_rate', None)
+                if max_scan_rate is not None:
+                    self.config_max_rate = max(self.MIN_RATE, min(self.MAX_RATE, int(max_scan_rate)))
+                    log.info("masscan.max_rate_from_config rate=%d", self.config_max_rate)
+
+            log.debug("masscan.config_applied intrusive=%s max_rate=%d", 
+                     self.allow_intrusive, self.config_max_rate)
         except Exception as e:
-            log.debug("masscan.config_apply_failed error=%s using_defaults", str(e))
+            log.warning("masscan.config_apply_failed error=%s using_safe_defaults", str(e))
+            # Reset to safe defaults on error
+            self.circuit_breaker_failure_threshold = 3
+            self.circuit_breaker_recovery_timeout = 90.0
+            self.default_timeout_sec = 300.0
+            self.allow_intrusive = False
+            self.config_max_rate = self.MAX_RATE
     
     async def _execute_tool(self, inp: ToolInput, timeout_sec: Optional[float] = None) -> ToolOutput:
         """Execute Masscan with enhanced validation and safety."""
@@ -158,16 +191,18 @@ class MasscanTool(MCPBaseTool):
                 
                 # Still block if extremely large
                 if network.num_addresses > self.MAX_NETWORK_SIZE * 4:
+                    max_cidr = self._get_max_cidr_for_size(self.MAX_NETWORK_SIZE * 4)
                     error_context = ErrorContext(
                         error_type=ToolErrorType.VALIDATION_ERROR,
                         message=f"Network range too large: {network.num_addresses} addresses",
-                        recovery_suggestion=f"Maximum supported: {self.MAX_NETWORK_SIZE * 4} addresses",
+                        recovery_suggestion=f"Use /{max_cidr} or smaller (max {self.MAX_NETWORK_SIZE * 4} hosts)",
                         timestamp=self._get_timestamp(),
                         tool_name=self.tool_name,
                         target=target,
                         metadata={
                             "network_size": network.num_addresses,
-                            "max_allowed": self.MAX_NETWORK_SIZE * 4
+                            "max_allowed": self.MAX_NETWORK_SIZE * 4,
+                            "suggested_cidr": f"/{max_cidr}"
                         }
                     )
                     return self._create_error_output(error_context, inp.correlation_id or "")
@@ -187,8 +222,15 @@ class MasscanTool(MCPBaseTool):
         
         return None
     
+    def _get_max_cidr_for_size(self, max_hosts: int) -> int:
+        """Calculate maximum CIDR prefix for given host count."""
+        # For max_hosts, calculate the CIDR prefix
+        # Example: 262144 hosts = /14, 65536 hosts = /16, 1024 hosts = /22
+        bits_needed = math.ceil(math.log2(max_hosts))
+        return max(0, 32 - bits_needed)
+    
     def _parse_and_validate_args(self, extra_args: str) -> str:
-        """Parse and validate masscan arguments."""
+        """Parse and validate masscan arguments with strict security."""
         if not extra_args:
             return ""
         
@@ -202,20 +244,30 @@ class MasscanTool(MCPBaseTool):
         while i < len(tokens):
             token = tokens[i]
             
+            # Check if it's a flag
+            if not token.startswith("-"):
+                # Non-flag token - this is a security risk, block it
+                raise ValueError(f"Unexpected non-flag token (potential injection): {token}")
+            
             # Check rate specifications
-            if token == "--rate":
+            if token in ("--rate", "--max-rate"):
                 if i + 1 < len(tokens):
                     rate_spec = tokens[i + 1]
                     try:
                         rate = int(rate_spec)
-                        if not (self.MIN_RATE <= rate <= self.MAX_RATE):
-                            raise ValueError(f"Rate must be between {self.MIN_RATE} and {self.MAX_RATE}")
+                        # Apply config-based max rate
+                        if rate > self.config_max_rate:
+                            log.warning("masscan.rate_limited requested=%d max=%d", rate, self.config_max_rate)
+                            rate = self.config_max_rate
+                        elif rate < self.MIN_RATE:
+                            log.warning("masscan.rate_increased requested=%d min=%d", rate, self.MIN_RATE)
+                            rate = self.MIN_RATE
                         validated.extend([token, str(rate)])
                     except ValueError:
                         raise ValueError(f"Invalid rate specification: {rate_spec}")
                     i += 2
                 else:
-                    raise ValueError("--rate requires a value")
+                    raise ValueError(f"{token} requires a value")
             
             # Check port specifications
             elif token in ("-p", "--ports"):
@@ -227,6 +279,15 @@ class MasscanTool(MCPBaseTool):
                     i += 2
                 else:
                     raise ValueError(f"Port flag {token} requires a value")
+            
+            # Check banner grabbing (controlled by policy)
+            elif token == "--banners":
+                if not self.allow_intrusive:
+                    log.warning("masscan.banners_blocked intrusive_not_allowed")
+                    i += 1
+                    continue
+                validated.append(token)
+                i += 1
             
             # Check interface specifications
             elif token in ("-e", "--interface"):
@@ -241,24 +302,34 @@ class MasscanTool(MCPBaseTool):
                     raise ValueError(f"Interface flag {token} requires a value")
             
             # Check other flags
-            elif token.startswith("-"):
+            else:
                 flag_base = token.split("=")[0] if "=" in token else token
                 if any(flag_base.startswith(allowed) for allowed in self.allowed_flags):
-                    validated.append(token)
+                    # Check if flag expects a value
+                    if token in ("--wait", "--retries", "--connection-timeout", "--ttl",
+                                "--router-ip", "--router-mac", "--source-ip", "--source-port",
+                                "--adapter-ip", "--adapter-mac", "--exclude", "--excludefile"):
+                        if i + 1 < len(tokens) and not tokens[i + 1].startswith("-"):
+                            # Validate the value
+                            value = tokens[i + 1]
+                            if not re.match(r'^[A-Za-z0-9._/:\-,]+$', value):
+                                raise ValueError(f"Invalid value for {token}: {value}")
+                            validated.extend([token, value])
+                            i += 2
+                        else:
+                            raise ValueError(f"{token} requires a value")
+                    else:
+                        validated.append(token)
+                        i += 1
                 else:
                     raise ValueError(f"Flag not allowed: {token}")
-                i += 1
-            
-            else:
-                # Non-flag tokens
-                validated.append(token)
-                i += 1
         
         return " ".join(validated)
     
     def _validate_port_specification(self, port_spec: str) -> bool:
         """Validate port specification for safety."""
         # Allow formats: 80, 80-443, 80,443, 1-65535
+        # But exclude port 0 for security
         if not port_spec:
             return False
         
@@ -278,14 +349,22 @@ class MasscanTool(MCPBaseTool):
                     return False
                 try:
                     start, end = int(parts[0]), int(parts[1])
-                    if not (0 <= start <= 65535 and 0 <= end <= 65535 and start <= end):
+                    # Exclude port 0
+                    if start == 0 or end == 0:
+                        log.warning("masscan.port_zero_blocked")
+                        return False
+                    if not (1 <= start <= 65535 and 1 <= end <= 65535 and start <= end):
                         return False
                 except ValueError:
                     return False
             else:
                 try:
                     port = int(range_spec)
-                    if not 0 <= port <= 65535:
+                    # Exclude port 0
+                    if port == 0:
+                        log.warning("masscan.port_zero_blocked")
+                        return False
+                    if not 1 <= port <= 65535:
                         return False
                 except ValueError:
                     return False
@@ -305,15 +384,17 @@ class MasscanTool(MCPBaseTool):
         optimized = []
         
         # Check what's already specified
-        has_rate = any("--rate" in t for t in tokens)
+        has_rate = any("--rate" in t or "--max-rate" in t for t in tokens)
         has_wait = any("--wait" in t for t in tokens)
         has_retries = any("--retries" in t for t in tokens)
         has_ports = any(t in ("-p", "--ports") for t in tokens)
         
         # Add safety defaults
         if not has_rate:
-            optimized.extend(["--rate", str(self.DEFAULT_RATE)])
-            log.info("masscan.rate_limit_applied rate=%d", self.DEFAULT_RATE)
+            # Use conservative default rate
+            default_rate = min(self.DEFAULT_RATE, self.config_max_rate)
+            optimized.extend(["--rate", str(default_rate)])
+            log.info("masscan.rate_limit_applied rate=%d", default_rate)
         
         if not has_wait:
             optimized.extend(["--wait", str(self.DEFAULT_WAIT)])
@@ -323,7 +404,12 @@ class MasscanTool(MCPBaseTool):
         
         if not has_ports:
             # Default to common ports if not specified
-            optimized.extend(["-p", "80,443,22,21,23,25,3306,3389,8080,8443"])
+            if self.allow_intrusive:
+                # More comprehensive port list for intrusive mode
+                optimized.extend(["-p", "21-23,25,53,80,110,111,135,139,143,443,445,993,995,1723,3306,3389,5900,8080,8443"])
+            else:
+                # Conservative port list
+                optimized.extend(["-p", "80,443,22,21,23,25,3306,3389,8080,8443"])
         
         # Add existing arguments
         optimized.extend(tokens)
@@ -343,6 +429,7 @@ class MasscanTool(MCPBaseTool):
             "concurrency": self.concurrency,
             "timeout": self.default_timeout_sec,
             "allowed_flags": list(self.allowed_flags),
+            "intrusive_allowed": self.allow_intrusive,
             "circuit_breaker": {
                 "enabled": self._circuit_breaker is not None,
                 "failure_threshold": self.circuit_breaker_failure_threshold,
@@ -352,14 +439,16 @@ class MasscanTool(MCPBaseTool):
             "safety_limits": {
                 "max_network_size": self.MAX_NETWORK_SIZE,
                 "default_rate": self.DEFAULT_RATE,
-                "max_rate": self.MAX_RATE,
-                "min_rate": self.MIN_RATE
+                "config_max_rate": self.config_max_rate,
+                "min_rate": self.MIN_RATE,
+                "banner_grabbing": "allowed" if self.allow_intrusive else "blocked"
             },
             "network_safety": {
-                "rate_limiting": f"{self.DEFAULT_RATE} packets/sec",
+                "rate_limiting": f"{min(self.DEFAULT_RATE, self.config_max_rate)} packets/sec",
                 "wait_time": f"{self.DEFAULT_WAIT}s between packets",
                 "retries": 1,
-                "large_network_support": True
+                "large_network_support": True,
+                "port_zero_blocked": True
             },
             "metrics": {
                 "available": self.metrics is not None,

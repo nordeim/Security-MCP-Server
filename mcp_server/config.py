@@ -1,12 +1,14 @@
 """
 Configuration management system for MCP server.
 Production-ready implementation with validation, hot-reload, and sensitive data handling.
+Enhanced with all security and reliability fixes.
 """
 import os
 import logging
 import json
 import yaml
 import threading
+import socket
 from typing import Dict, Any, Optional, List, Union
 from datetime import datetime
 from pathlib import Path
@@ -28,12 +30,13 @@ class DatabaseConfig:
 
 @dataclass
 class SecurityConfig:
-    """Security configuration."""
+    """Security configuration with enhanced validation."""
     allowed_targets: List[str] = field(default_factory=lambda: ["RFC1918", ".lab.internal"])
     max_args_length: int = 2048
     max_output_size: int = 1048576
     timeout_seconds: int = 300
     concurrency_limit: int = 2
+    allow_intrusive: bool = False  # Added for intrusive scan control
 
 
 @dataclass
@@ -98,6 +101,7 @@ class ToolConfig:
 class MCPConfig:
     """
     Main MCP configuration class with validation and hot-reload support.
+    Enhanced with security fixes and improved validation.
     """
     
     def __init__(self, config_path: Optional[str] = None):
@@ -205,6 +209,7 @@ class MCPConfig:
             'MCP_SECURITY_MAX_ARGS_LENGTH': ('security', 'max_args_length'),
             'MCP_SECURITY_TIMEOUT_SECONDS': ('security', 'timeout_seconds'),
             'MCP_SECURITY_CONCURRENCY_LIMIT': ('security', 'concurrency_limit'),
+            'MCP_SECURITY_ALLOW_INTRUSIVE': ('security', 'allow_intrusive'),
             'MCP_CIRCUIT_BREAKER_FAILURE_THRESHOLD': ('circuit_breaker', 'failure_threshold'),
             'MCP_CIRCUIT_BREAKER_RECOVERY_TIMEOUT': ('circuit_breaker', 'recovery_timeout'),
             'MCP_HEALTH_CHECK_INTERVAL': ('health', 'check_interval'),
@@ -242,7 +247,7 @@ class MCPConfig:
                         config[section][key] = float(value)
                     except ValueError:
                         log.warning("config.invalid_float env_var=%s value=%s", env_var, value)
-                elif key in ['enabled', 'prometheus_enabled']:
+                elif key in ['enabled', 'prometheus_enabled', 'allow_intrusive']:
                     config[section][key] = value.lower() in ['true', '1', 'yes', 'on']
                 else:
                     config[section][key] = value
@@ -250,11 +255,17 @@ class MCPConfig:
         return config
     
     def _deep_merge(self, base: Dict, override: Dict) -> Dict:
-        """Deep merge configuration dictionaries."""
+        """Enhanced deep merge configuration dictionaries with list handling."""
         result = base.copy()
         for key, value in override.items():
-            if key in result and isinstance(result[key], dict) and isinstance(value, dict):
-                result[key] = self._deep_merge(result[key], value)
+            if key in result:
+                if isinstance(result[key], dict) and isinstance(value, dict):
+                    result[key] = self._deep_merge(result[key], value)
+                elif isinstance(result[key], list) and isinstance(value, list):
+                    # For lists, replace instead of extend to maintain control
+                    result[key] = value
+                else:
+                    result[key] = value
             else:
                 result[key] = value
         return result
@@ -287,7 +298,7 @@ class MCPConfig:
             config['pool_recycle'] = max(60, min(7200, int(config['pool_recycle'])))
     
     def _validate_security_config(self, config: Dict):
-        """Validate security configuration."""
+        """Enhanced security configuration validation."""
         if 'max_args_length' in config:
             config['max_args_length'] = max(1, min(10240, int(config['max_args_length'])))
         if 'max_output_size' in config:
@@ -296,6 +307,17 @@ class MCPConfig:
             config['timeout_seconds'] = max(1, min(3600, int(config['timeout_seconds'])))
         if 'concurrency_limit' in config:
             config['concurrency_limit'] = max(1, min(100, int(config['concurrency_limit'])))
+        
+        # Validate allowed targets
+        if 'allowed_targets' in config:
+            valid_patterns = {'RFC1918', 'loopback'}
+            validated_targets = []
+            for target in config['allowed_targets']:
+                if target in valid_patterns or (isinstance(target, str) and target.startswith('.')):
+                    validated_targets.append(target)
+                else:
+                    log.warning("config.invalid_target_pattern pattern=%s", target)
+            config['allowed_targets'] = validated_targets if validated_targets else ['RFC1918']
     
     def _validate_circuit_breaker_config(self, config: Dict):
         """Validate circuit breaker configuration."""
@@ -324,7 +346,7 @@ class MCPConfig:
             config['collection_interval'] = max(5.0, min(300.0, float(config['collection_interval'])))
     
     def _validate_server_config(self, config: Dict):
-        """Validate server configuration."""
+        """Enhanced server configuration validation with proper host checking."""
         if 'port' in config:
             port = int(config['port'])
             if not (1 <= port <= 65535):
@@ -338,14 +360,8 @@ class MCPConfig:
             config['transport'] = transport
         
         if 'host' in config:
-            import socket
-            try:
-                socket.inet_aton(config['host'])
-            except socket.error:
-                try:
-                    socket.gethostbyname(config['host'])
-                except socket.error:
-                    raise ValueError(f"Invalid host: {config['host']}")
+            if not self._validate_host(config['host']):
+                raise ValueError(f"Invalid host: {config['host']}")
         
         if 'workers' in config:
             config['workers'] = max(1, min(16, int(config['workers'])))
@@ -353,6 +369,22 @@ class MCPConfig:
             config['max_connections'] = max(1, min(10000, int(config['max_connections'])))
         if 'shutdown_grace_period' in config:
             config['shutdown_grace_period'] = max(0.0, min(300.0, float(config['shutdown_grace_period'])))
+    
+    def _validate_host(self, host: str) -> bool:
+        """Validate host without resource leaks."""
+        try:
+            # Try to parse as IP address first
+            socket.inet_aton(host)
+            return True
+        except socket.error:
+            pass
+        
+        # Use getaddrinfo which handles cleanup properly
+        try:
+            socket.getaddrinfo(host, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+            return True
+        except (socket.gaierror, socket.error):
+            return False
     
     def _validate_tool_config(self, config: Dict):
         """Validate tool configuration."""
@@ -363,37 +395,12 @@ class MCPConfig:
     
     def _apply_config(self, config_data: Dict[str, Any]):
         """Apply validated configuration."""
-        if 'database' in config_data:
-            for key, value in config_data['database'].items():
-                setattr(self.database, key, value)
-        
-        if 'security' in config_data:
-            for key, value in config_data['security'].items():
-                setattr(self.security, key, value)
-        
-        if 'circuit_breaker' in config_data:
-            for key, value in config_data['circuit_breaker'].items():
-                setattr(self.circuit_breaker, key, value)
-        
-        if 'health' in config_data:
-            for key, value in config_data['health'].items():
-                setattr(self.health, key, value)
-        
-        if 'metrics' in config_data:
-            for key, value in config_data['metrics'].items():
-                setattr(self.metrics, key, value)
-        
-        if 'logging' in config_data:
-            for key, value in config_data['logging'].items():
-                setattr(self.logging, key, value)
-        
-        if 'server' in config_data:
-            for key, value in config_data['server'].items():
-                setattr(self.server, key, value)
-        
-        if 'tool' in config_data:
-            for key, value in config_data['tool'].items():
-                setattr(self.tool, key, value)
+        for section_name in ['database', 'security', 'circuit_breaker', 'health', 
+                             'metrics', 'logging', 'server', 'tool']:
+            if section_name in config_data:
+                section_obj = getattr(self, section_name)
+                for key, value in config_data[section_name].items():
+                    setattr(section_obj, key, value)
         
         self._config_data = config_data
     
@@ -411,7 +418,7 @@ class MCPConfig:
         
         return False
     
-    def reload_config(self):
+    def reload_config(self) -> bool:
         """Thread-safe configuration reload."""
         with self._config_lock():
             if self.check_for_changes():
@@ -432,7 +439,7 @@ class MCPConfig:
             'database.url',
             'security.api_key',
             'security.secret_key',
-            'logging.file_path'
+            'security.token'
         ]
     
     def redact_sensitive_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -521,6 +528,7 @@ def get_config(config_path: Optional[str] = None, force_new: bool = False) -> MC
     
     with _config_lock:
         if force_new or _config_instance is None:
+            config_path = config_path or os.getenv('MCP_CONFIG_FILE')
             _config_instance = MCPConfig(config_path)
         return _config_instance
 

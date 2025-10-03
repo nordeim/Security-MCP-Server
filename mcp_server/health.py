@@ -1,6 +1,6 @@
 """
 Health monitoring system for MCP server.
-Production-ready implementation with priority-based checks and robust error handling.
+Production-ready implementation with simplified config handling and proper async patterns.
 """
 import asyncio
 import logging
@@ -34,6 +34,7 @@ class HealthCheckResult:
     name: str
     status: HealthStatus
     message: str
+    priority: int = 2
     timestamp: datetime = field(default_factory=datetime.now)
     duration: float = 0.0
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -51,28 +52,26 @@ class SystemHealth:
 class HealthCheck:
     """Base class for health checks."""
     
-    def __init__(self, name: str, timeout: float = 10.0):
+    def __init__(self, name: str, priority: int = 2, timeout: float = 10.0):
         self.name = name
+        self.priority = max(0, min(2, priority))  # Clamp to 0-2
         self.timeout = max(1.0, timeout)
     
     async def check(self) -> HealthCheckResult:
-        """Execute the health check."""
+        """Execute the health check with timeout."""
         start_time = time.time()
         try:
             result = await asyncio.wait_for(self._execute_check(), timeout=self.timeout)
             duration = time.time() - start_time
-            return HealthCheckResult(
-                name=self.name,
-                status=result.status,
-                message=result.message,
-                duration=duration,
-                metadata=result.metadata
-            )
+            result.duration = duration
+            result.priority = self.priority
+            return result
         except asyncio.TimeoutError:
             return HealthCheckResult(
                 name=self.name,
                 status=HealthStatus.UNHEALTHY,
                 message=f"Health check timed out after {self.timeout}s",
+                priority=self.priority,
                 duration=self.timeout
             )
         except Exception as e:
@@ -82,6 +81,7 @@ class HealthCheck:
                 name=self.name,
                 status=HealthStatus.UNHEALTHY,
                 message=f"Health check failed: {str(e)}",
+                priority=self.priority,
                 duration=duration
             )
     
@@ -96,8 +96,9 @@ class SystemResourceHealthCheck(HealthCheck):
     def __init__(self, name: str = "system_resources", 
                  cpu_threshold: float = 80.0,
                  memory_threshold: float = 80.0,
-                 disk_threshold: float = 80.0):
-        super().__init__(name)
+                 disk_threshold: float = 80.0,
+                 priority: int = 0):
+        super().__init__(name, priority)
         self.cpu_threshold = max(0.0, min(100.0, cpu_threshold))
         self.memory_threshold = max(0.0, min(100.0, memory_threshold))
         self.disk_threshold = max(0.0, min(100.0, disk_threshold))
@@ -109,6 +110,7 @@ class SystemResourceHealthCheck(HealthCheck):
                 name=self.name,
                 status=HealthStatus.DEGRADED,
                 message="psutil not available for system resource monitoring",
+                priority=self.priority,
                 metadata={"psutil_available": False}
             )
         
@@ -147,6 +149,7 @@ class SystemResourceHealthCheck(HealthCheck):
                 name=self.name,
                 status=status,
                 message=message,
+                priority=self.priority,
                 metadata={
                     "cpu_percent": cpu_percent,
                     "memory_percent": memory_percent,
@@ -164,6 +167,7 @@ class SystemResourceHealthCheck(HealthCheck):
                 name=self.name,
                 status=HealthStatus.UNHEALTHY,
                 message=f"Failed to check system resources: {str(e)}",
+                priority=self.priority,
                 metadata={"psutil_available": PSUTIL_AVAILABLE}
             )
 
@@ -171,8 +175,8 @@ class SystemResourceHealthCheck(HealthCheck):
 class ToolAvailabilityHealthCheck(HealthCheck):
     """Check availability of MCP tools."""
     
-    def __init__(self, tool_registry, name: str = "tool_availability"):
-        super().__init__(name)
+    def __init__(self, tool_registry, name: str = "tool_availability", priority: int = 2):
+        super().__init__(name, priority)
         self.tool_registry = tool_registry
     
     async def _execute_check(self) -> HealthCheckResult:
@@ -183,6 +187,7 @@ class ToolAvailabilityHealthCheck(HealthCheck):
                     name=self.name,
                     status=HealthStatus.UNHEALTHY,
                     message="Tool registry does not support get_enabled_tools method",
+                    priority=self.priority,
                     metadata={"registry_type": type(self.tool_registry).__name__}
                 )
             
@@ -203,6 +208,7 @@ class ToolAvailabilityHealthCheck(HealthCheck):
                     name=self.name,
                     status=HealthStatus.DEGRADED,
                     message=f"Unavailable tools: {', '.join(unavailable_tools)}",
+                    priority=self.priority,
                     metadata={
                         "total_tools": len(tools),
                         "unavailable_tools": unavailable_tools,
@@ -214,6 +220,7 @@ class ToolAvailabilityHealthCheck(HealthCheck):
                     name=self.name,
                     status=HealthStatus.HEALTHY,
                     message=f"All {len(tools)} tools available",
+                    priority=self.priority,
                     metadata={
                         "total_tools": len(tools),
                         "available_tools": len(tools)
@@ -226,6 +233,7 @@ class ToolAvailabilityHealthCheck(HealthCheck):
                 name=self.name,
                 status=HealthStatus.UNHEALTHY,
                 message=f"Failed to check tool availability: {str(e)}",
+                priority=self.priority,
                 metadata={"registry_type": type(self.tool_registry).__name__ if self.tool_registry else None}
             )
 
@@ -233,8 +241,8 @@ class ToolAvailabilityHealthCheck(HealthCheck):
 class ProcessHealthCheck(HealthCheck):
     """Check if the process is running properly."""
     
-    def __init__(self, name: str = "process_health"):
-        super().__init__(name)
+    def __init__(self, name: str = "process_health", priority: int = 1):
+        super().__init__(name, priority)
     
     async def _execute_check(self) -> HealthCheckResult:
         """Check process health."""
@@ -243,6 +251,7 @@ class ProcessHealthCheck(HealthCheck):
                 name=self.name,
                 status=HealthStatus.DEGRADED,
                 message="psutil not available for process health monitoring",
+                priority=self.priority,
                 metadata={"psutil_available": False}
             )
         
@@ -254,6 +263,7 @@ class ProcessHealthCheck(HealthCheck):
                     name=self.name,
                     status=HealthStatus.UNHEALTHY,
                     message="Process is not running",
+                    priority=self.priority,
                     metadata={"pid": process.pid}
                 )
             
@@ -269,6 +279,7 @@ class ProcessHealthCheck(HealthCheck):
                 name=self.name,
                 status=HealthStatus.HEALTHY,
                 message="Process is running",
+                priority=self.priority,
                 metadata={
                     "pid": process.pid,
                     "age_seconds": age.total_seconds(),
@@ -285,6 +296,7 @@ class ProcessHealthCheck(HealthCheck):
                 name=self.name,
                 status=HealthStatus.UNHEALTHY,
                 message=f"Failed to check process health: {str(e)}",
+                priority=self.priority,
                 metadata={"psutil_available": PSUTIL_AVAILABLE}
             )
 
@@ -292,8 +304,8 @@ class ProcessHealthCheck(HealthCheck):
 class DependencyHealthCheck(HealthCheck):
     """Check external dependencies."""
     
-    def __init__(self, dependencies: List[str], name: str = "dependencies"):
-        super().__init__(name)
+    def __init__(self, dependencies: List[str], name: str = "dependencies", priority: int = 2):
+        super().__init__(name, priority)
         self.dependencies = dependencies or []
     
     async def _execute_check(self) -> HealthCheckResult:
@@ -318,6 +330,7 @@ class DependencyHealthCheck(HealthCheck):
                     name=self.name,
                     status=HealthStatus.UNHEALTHY,
                     message=f"Missing dependencies: {', '.join(missing_deps)}",
+                    priority=self.priority,
                     metadata={
                         "total_dependencies": len(self.dependencies),
                         "missing_dependencies": missing_deps,
@@ -329,6 +342,7 @@ class DependencyHealthCheck(HealthCheck):
                     name=self.name,
                     status=HealthStatus.HEALTHY,
                     message=f"All {len(self.dependencies)} dependencies available",
+                    priority=self.priority,
                     metadata={
                         "total_dependencies": len(self.dependencies),
                         "available_dependencies": available_deps
@@ -341,6 +355,7 @@ class DependencyHealthCheck(HealthCheck):
                 name=self.name,
                 status=HealthStatus.UNHEALTHY,
                 message=f"Failed to check dependencies: {str(e)}",
+                priority=self.priority,
                 metadata={"dependencies": self.dependencies}
             )
 
@@ -349,8 +364,8 @@ class CustomHealthCheck(HealthCheck):
     """Custom health check with user-provided function."""
     
     def __init__(self, name: str, check_func: Callable[[], Awaitable[HealthStatus]], 
-                 timeout: float = 10.0):
-        super().__init__(name, timeout)
+                 priority: int = 2, timeout: float = 10.0):
+        super().__init__(name, priority, timeout)
         self.check_func = check_func
     
     async def _execute_check(self) -> HealthCheckResult:
@@ -361,122 +376,129 @@ class CustomHealthCheck(HealthCheck):
             return HealthCheckResult(
                 name=self.name,
                 status=status,
-                message=message
+                message=message,
+                priority=self.priority
             )
         except Exception as e:
             return HealthCheckResult(
                 name=self.name,
                 status=HealthStatus.UNHEALTHY,
-                message=f"Custom check failed: {str(e)}"
+                message=f"Custom check failed: {str(e)}",
+                priority=self.priority
             )
 
 
 class HealthCheckManager:
-    """Manager for health checks with priority support."""
+    """Manager for health checks with simplified config and overlap prevention."""
     
-    def __init__(self, config: Optional[Union[dict, object]] = None):
+    def __init__(self, config: Optional[Union[dict, object]] = None, checks: Optional[List[HealthCheck]] = None,
+                 check_timeout_seconds: float = 10.0):
         self._raw_config = config
-        self.config = self._normalize_config_safe(self._raw_config)
+        self.config = self._normalize_config(config)
         
         self.health_checks: Dict[str, HealthCheck] = {}
         self.check_priorities: Dict[str, int] = {}
         
         self.last_health_check: Optional[SystemHealth] = None
-        self.check_interval = max(5.0, float(self.config.get('check_interval', 30.0)))
+        self.check_interval = self.config.get('check_interval', 30.0)
+        self.check_timeout_seconds = max(1.0, check_timeout_seconds)
         
         self._monitor_task: Optional[asyncio.Task] = None
         self._shutdown_event = asyncio.Event()
+        self._check_in_progress = False
         
         self.check_history = deque(maxlen=100)
         
+        # Register provided checks
+        if checks:
+            for check in checks:
+                self.add_health_check(check, check.priority)
+        
         self._initialize_default_checks()
     
-    def _normalize_config_safe(self, cfg: Union[dict, object]) -> dict:
-        """Safer config normalization with better error handling."""
+    def _normalize_config(self, cfg: Union[dict, object, None]) -> dict:
+        """Simplified config normalization."""
         defaults = {
             'check_interval': 30.0,
-            'health_cpu_threshold': 80.0,
-            'health_memory_threshold': 80.0,
-            'health_disk_threshold': 80.0,
-            'health_dependencies': [],
-            'health_timeout': 10.0,
+            'cpu_threshold': 80.0,
+            'memory_threshold': 80.0,
+            'disk_threshold': 80.0,
+            'dependencies': [],
+            'timeout': 10.0,
         }
         
         if cfg is None:
             return defaults
         
-        normalized = defaults.copy()
+        result = defaults.copy()
         
-        try:
-            if isinstance(cfg, dict):
-                for key in defaults:
-                    if key in cfg:
-                        normalized[key] = cfg[key]
-                
-                if 'health' in cfg and isinstance(cfg['health'], dict):
-                    health = cfg['health']
-                    normalized.update({
-                        'check_interval': health.get('check_interval', normalized['check_interval']),
-                        'health_cpu_threshold': health.get('cpu_threshold', normalized['health_cpu_threshold']),
-                        'health_memory_threshold': health.get('memory_threshold', normalized['health_memory_threshold']),
-                        'health_disk_threshold': health.get('disk_threshold', normalized['health_disk_threshold']),
-                        'health_dependencies': health.get('dependencies', normalized['health_dependencies']),
-                        'health_timeout': health.get('timeout', normalized['health_timeout']),
-                    })
+        # Handle dict config
+        if isinstance(cfg, dict):
+            # Direct keys
+            for key in defaults:
+                if key in cfg:
+                    result[key] = cfg[key]
             
-            elif hasattr(cfg, 'health'):
-                health = getattr(cfg, 'health')
-                if health:
-                    for attr, key in [
-                        ('check_interval', 'check_interval'),
-                        ('cpu_threshold', 'health_cpu_threshold'),
-                        ('memory_threshold', 'health_memory_threshold'),
-                        ('disk_threshold', 'health_disk_threshold'),
-                        ('dependencies', 'health_dependencies'),
-                        ('timeout', 'health_timeout'),
-                    ]:
-                        if hasattr(health, attr):
-                            value = getattr(health, attr, None)
-                            if value is not None:
-                                normalized[key] = value
-            
-            normalized['check_interval'] = max(5.0, float(normalized['check_interval']))
-            normalized['health_cpu_threshold'] = max(0.0, min(100.0, float(normalized['health_cpu_threshold'])))
-            normalized['health_memory_threshold'] = max(0.0, min(100.0, float(normalized['health_memory_threshold'])))
-            normalized['health_disk_threshold'] = max(0.0, min(100.0, float(normalized['health_disk_threshold'])))
-            normalized['health_timeout'] = max(1.0, float(normalized.get('health_timeout', 10.0)))
-            
-            deps = normalized.get('health_dependencies', [])
-            if not isinstance(deps, list):
-                normalized['health_dependencies'] = []
-            
-        except Exception as e:
-            log.error("config.normalization_failed error=%s using_defaults", str(e))
-            return defaults
+            # Nested health section
+            if 'health' in cfg and isinstance(cfg['health'], dict):
+                health = cfg['health']
+                mapping = {
+                    'check_interval': 'check_interval',
+                    'cpu_threshold': 'cpu_threshold',
+                    'memory_threshold': 'memory_threshold',
+                    'disk_threshold': 'disk_threshold',
+                    'dependencies': 'dependencies',
+                    'timeout': 'timeout'
+                }
+                for src, dst in mapping.items():
+                    if src in health:
+                        result[dst] = health[src]
         
-        return normalized
+        # Handle object config
+        elif hasattr(cfg, 'health'):
+            health = getattr(cfg, 'health', None)
+            if health:
+                for attr in ['check_interval', 'cpu_threshold', 'memory_threshold', 
+                            'disk_threshold', 'dependencies', 'timeout']:
+                    if hasattr(health, attr):
+                        value = getattr(health, attr, None)
+                        if value is not None:
+                            result[attr] = value
+        
+        # Validate and clamp values
+        result['check_interval'] = max(5.0, float(result['check_interval']))
+        result['cpu_threshold'] = max(0.0, min(100.0, float(result['cpu_threshold'])))
+        result['memory_threshold'] = max(0.0, min(100.0, float(result['memory_threshold'])))
+        result['disk_threshold'] = max(0.0, min(100.0, float(result['disk_threshold'])))
+        result['timeout'] = max(1.0, float(result['timeout']))
+        
+        if not isinstance(result['dependencies'], list):
+            result['dependencies'] = []
+        
+        return result
     
     def _initialize_default_checks(self):
         """Initialize default health checks."""
         try:
-            cpu_th = float(self.config.get('health_cpu_threshold', 80.0))
-            mem_th = float(self.config.get('health_memory_threshold', 80.0))
-            disk_th = float(self.config.get('health_disk_threshold', 80.0))
-            
+            # System resources check (critical)
             self.add_health_check(
                 SystemResourceHealthCheck(
-                    cpu_threshold=cpu_th,
-                    memory_threshold=mem_th,
-                    disk_threshold=disk_th
+                    cpu_threshold=self.config['cpu_threshold'],
+                    memory_threshold=self.config['memory_threshold'],
+                    disk_threshold=self.config['disk_threshold']
                 ),
                 priority=0
             )
             
+            # Process health (important)
             self.add_health_check(ProcessHealthCheck(), priority=1)
             
-            health_deps = self.config.get('health_dependencies', []) or []
-            if health_deps:
-                self.add_health_check(DependencyHealthCheck(health_deps), priority=2)
+            # Dependencies (informational)
+            if self.config['dependencies']:
+                self.add_health_check(
+                    DependencyHealthCheck(self.config['dependencies']),
+                    priority=2
+                )
             
             log.info("health_check_manager.initialized checks=%d interval=%.1f", 
                     len(self.health_checks), self.check_interval)
@@ -506,90 +528,113 @@ class HealthCheckManager:
     def register_check(self, name: str, check_func: Callable[[], Awaitable[HealthStatus]], 
                       priority: int = 2, timeout: float = 10.0):
         """Register a custom health check function."""
-        health_check = CustomHealthCheck(name, check_func, timeout)
+        health_check = CustomHealthCheck(name, check_func, priority, timeout)
         self.add_health_check(health_check, priority)
     
+    async def run_checks(self) -> SystemHealth:
+        """Alias for run_health_checks for compatibility."""
+        return await self.run_health_checks()
+    
     async def run_health_checks(self) -> SystemHealth:
-        """Run health checks with proper timeout and error handling."""
-        if not self.health_checks:
+        """Run health checks with overlap prevention."""
+        if self._check_in_progress:
+            log.warning("health_checks.already_running skipping")
+            if self.last_health_check:
+                return self.last_health_check
             return SystemHealth(
-                overall_status=HealthStatus.HEALTHY,
+                overall_status=HealthStatus.DEGRADED,
                 checks={},
-                metadata={"message": "No health checks configured"}
+                metadata={"message": "Health check already in progress"}
             )
         
-        check_results = {}
-        tasks = []
-        
-        timeout = self.config.get('health_timeout', 10.0)
-        
-        for name, health_check in self.health_checks.items():
-            if hasattr(health_check, 'timeout'):
-                health_check.timeout = min(health_check.timeout, timeout)
-            
-            task = asyncio.create_task(
-                self._run_single_check(name, health_check),
-                name=f"health_check_{name}"
-            )
-            tasks.append((name, task))
-        
+        self._check_in_progress = True
         try:
-            done, pending = await asyncio.wait(
-                [task for _, task in tasks],
-                timeout=timeout + 2.0,
-                return_when=asyncio.ALL_COMPLETED
-            )
+            if not self.health_checks:
+                return SystemHealth(
+                    overall_status=HealthStatus.HEALTHY,
+                    checks={},
+                    metadata={"message": "No health checks configured"}
+                )
             
-            for task in pending:
-                task.cancel()
-                log.warning("health_check.timeout task=%s", task.get_name())
+            check_results = {}
+            tasks = []
             
-        except Exception as e:
-            log.error("health_check.wait_failed error=%s", str(e))
-        
-        for name, task in tasks:
+            timeout = self.config.get('timeout', 10.0)
+            
+            for name, health_check in self.health_checks.items():
+                if hasattr(health_check, 'timeout'):
+                    health_check.timeout = min(health_check.timeout, timeout)
+                
+                task = asyncio.create_task(
+                    self._run_single_check(name, health_check),
+                    name=f"health_check_{name}"
+                )
+                tasks.append((name, task))
+            
+            # Wait for all checks with overall timeout
             try:
-                if task.done() and not task.cancelled():
-                    result = task.result()
-                else:
-                    result = HealthCheckResult(
+                done, pending = await asyncio.wait(
+                    [task for _, task in tasks],
+                    timeout=timeout + 2.0,
+                    return_when=asyncio.ALL_COMPLETED
+                )
+                
+                for task in pending:
+                    task.cancel()
+                    log.warning("health_check.timeout task=%s", task.get_name())
+                
+            except Exception as e:
+                log.error("health_check.wait_failed error=%s", str(e))
+            
+            # Collect results
+            for name, task in tasks:
+                try:
+                    if task.done() and not task.cancelled():
+                        result = task.result()
+                    else:
+                        result = HealthCheckResult(
+                            name=name,
+                            status=HealthStatus.UNHEALTHY,
+                            message="Health check timed out or was cancelled",
+                            priority=self.check_priorities.get(name, 2)
+                        )
+                    check_results[name] = result
+                except Exception as e:
+                    log.error("health_check.result_failed name=%s error=%s", name, str(e))
+                    check_results[name] = HealthCheckResult(
                         name=name,
                         status=HealthStatus.UNHEALTHY,
-                        message="Health check timed out or was cancelled"
+                        message=f"Health check failed: {str(e)}",
+                        priority=self.check_priorities.get(name, 2)
                     )
-                check_results[name] = result
-            except Exception as e:
-                log.error("health_check.result_failed name=%s error=%s", name, str(e))
-                check_results[name] = HealthCheckResult(
-                    name=name,
-                    status=HealthStatus.UNHEALTHY,
-                    message=f"Health check failed: {str(e)}"
-                )
-        
-        overall_status = self._calculate_overall_status(check_results)
-        
-        system_health = SystemHealth(
-            overall_status=overall_status,
-            checks=check_results,
-            metadata=self._generate_health_metadata(check_results)
-        )
-        
-        self.check_history.append({
-            "timestamp": system_health.timestamp,
-            "status": overall_status,
-            "check_count": len(check_results)
-        })
-        
-        self.last_health_check = system_health
-        
-        log.info(
-            "health_check.completed overall=%s checks=%d duration=%.2f",
-            overall_status.value,
-            len(check_results),
-            sum(r.duration for r in check_results.values())
-        )
-        
-        return system_health
+            
+            overall_status = self._calculate_overall_status(check_results)
+            
+            system_health = SystemHealth(
+                overall_status=overall_status,
+                checks=check_results,
+                metadata=self._generate_health_metadata(check_results)
+            )
+            
+            self.check_history.append({
+                "timestamp": system_health.timestamp,
+                "status": overall_status,
+                "check_count": len(check_results)
+            })
+            
+            self.last_health_check = system_health
+            
+            log.info(
+                "health_check.completed overall=%s checks=%d duration=%.2f",
+                overall_status.value,
+                len(check_results),
+                sum(r.duration for r in check_results.values())
+            )
+            
+            return system_health
+            
+        finally:
+            self._check_in_progress = False
     
     async def _run_single_check(self, name: str, health_check: HealthCheck) -> HealthCheckResult:
         """Run a single health check with error handling."""
@@ -600,11 +645,13 @@ class HealthCheckManager:
             return HealthCheckResult(
                 name=name,
                 status=HealthStatus.UNHEALTHY,
-                message=f"Check failed: {str(e)}"
+                message=f"Check failed: {str(e)}",
+                priority=self.check_priorities.get(name, 2)
             )
     
     def _calculate_overall_status(self, check_results: Dict[str, HealthCheckResult]) -> HealthStatus:
         """Calculate overall status with priority weighting."""
+        # Critical checks (priority 0)
         critical_checks = [
             result for name, result in check_results.items()
             if self.check_priorities.get(name, 2) == 0
@@ -613,6 +660,7 @@ class HealthCheckManager:
         if any(r.status == HealthStatus.UNHEALTHY for r in critical_checks):
             return HealthStatus.UNHEALTHY
         
+        # Important checks (priority 1)
         important_checks = [
             result for name, result in check_results.items()
             if self.check_priorities.get(name, 2) == 1
@@ -621,9 +669,11 @@ class HealthCheckManager:
         if any(r.status == HealthStatus.UNHEALTHY for r in important_checks):
             return HealthStatus.DEGRADED
         
+        # Any degraded status
         if any(r.status == HealthStatus.DEGRADED for r in check_results.values()):
             return HealthStatus.DEGRADED
         
+        # Informational checks (priority 2)
         info_checks = [
             result for name, result in check_results.items()
             if self.check_priorities.get(name, 2) == 2
@@ -653,7 +703,7 @@ class HealthCheckManager:
         }
     
     async def start_monitoring(self):
-        """Start health monitoring with proper lifecycle management."""
+        """Start health monitoring with overlap prevention."""
         if self._monitor_task and not self._monitor_task.done():
             log.warning("health_monitor.already_running")
             return
@@ -666,14 +716,21 @@ class HealthCheckManager:
         log.info("health_monitor.started interval=%.1f", self.check_interval)
     
     async def _monitor_loop(self):
-        """Health monitoring loop with graceful shutdown."""
+        """Health monitoring loop with overlap prevention."""
         try:
             while not self._shutdown_event.is_set():
                 try:
-                    await self.run_health_checks()
+                    # Run checks with timeout slightly less than interval
+                    await asyncio.wait_for(
+                        self.run_health_checks(),
+                        timeout=self.check_interval * 0.9
+                    )
+                except asyncio.TimeoutError:
+                    log.warning("health_monitor.check_timeout")
                 except Exception as e:
                     log.error("health_monitor.check_failed error=%s", str(e))
                 
+                # Wait for next interval or shutdown
                 try:
                     await asyncio.wait_for(
                         self._shutdown_event.wait(),
@@ -722,6 +779,7 @@ class HealthCheckManager:
                     "status": result.status.value,
                     "message": result.message,
                     "duration": result.duration,
+                    "priority": result.priority,
                     "metadata": result.metadata
                 }
                 for name, result in self.last_health_check.checks.items()

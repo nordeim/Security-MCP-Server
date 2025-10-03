@@ -1,6 +1,6 @@
 """
 Circuit breaker implementation for MCP tool resilience.
-Production-ready implementation with metrics, adaptive recovery, and proper concurrency handling.
+Production-ready with enhanced async handling and proper task management.
 """
 import asyncio
 import time
@@ -9,7 +9,7 @@ import inspect
 import random
 from enum import Enum
 from dataclasses import dataclass, field
-from typing import Callable, Any, Optional, Tuple, Dict
+from typing import Callable, Any, Optional, Tuple, Dict, Set
 from datetime import datetime, timedelta
 from collections import deque
 
@@ -73,7 +73,7 @@ class CircuitBreakerStats:
 
 class CircuitBreaker:
     """
-    Production-ready circuit breaker with adaptive recovery and metrics.
+    Production-ready circuit breaker with enhanced async support and task management.
     """
     
     def __init__(
@@ -111,6 +111,9 @@ class CircuitBreaker:
         self._recent_errors = deque(maxlen=10)
         self._half_open_calls = 0
         self._max_half_open_calls = 1
+        
+        # Store background tasks to prevent GC
+        self._background_tasks: Set[asyncio.Task] = set()
         
         self._update_metrics()
         
@@ -154,9 +157,9 @@ class CircuitBreaker:
     
     async def call(self, func: Callable, *args, **kwargs) -> Any:
         """
-        Execute function with circuit breaker protection.
+        Execute function with circuit breaker protection and proper async handling.
         """
-        # Check and potentially transition state
+        # Check and potentially transition state - all checks under lock
         async with self._lock:
             if self._state == CircuitBreakerState.OPEN:
                 if self._should_attempt_reset():
@@ -191,10 +194,18 @@ class CircuitBreaker:
         # Execute the function
         try:
             self.stats.total_calls += 1
-            result = func(*args, **kwargs)
             
-            if inspect.isawaitable(result):
-                result = await result
+            # Enhanced async detection
+            if inspect.iscoroutinefunction(func):
+                result = await func(*args, **kwargs)
+            else:
+                result = func(*args, **kwargs)
+                
+                # Check if result needs awaiting
+                if inspect.isawaitable(result) or asyncio.iscoroutine(result):
+                    result = await result
+                elif asyncio.isfuture(result):
+                    result = await result
             
             await self._on_success()
             self.stats.successful_calls += 1
@@ -375,22 +386,50 @@ class CircuitBreaker:
             log.info("circuit_breaker.force_close name=%s", self.name)
     
     def force_open_nowait(self):
-        """Synchronous wrapper for force_open."""
+        """Thread-safe async force open with proper task management."""
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
+            # No running loop, use sync version
             asyncio.run(self.force_open())
         else:
-            loop.create_task(self.force_open())
+            # Store task reference to prevent GC
+            task = loop.create_task(self.force_open())
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
     
     def force_close_nowait(self):
-        """Synchronous wrapper for force_close."""
+        """Thread-safe async force close with proper task management."""
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
+            # No running loop, use sync version
             asyncio.run(self.force_close())
         else:
-            loop.create_task(self.force_close())
+            # Store task reference to prevent GC
+            task = loop.create_task(self.force_close())
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
+    
+    def call_succeeded(self):
+        """Synchronous success handler for compatibility."""
+        try:
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(self._on_success())
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
+        except RuntimeError:
+            asyncio.run(self._on_success())
+    
+    def call_failed(self):
+        """Synchronous failure handler for compatibility."""
+        try:
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(self._on_failure())
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
+        except RuntimeError:
+            asyncio.run(self._on_failure())
     
     def get_stats(self) -> dict:
         """Get comprehensive circuit breaker statistics."""
