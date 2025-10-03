@@ -174,6 +174,11 @@ python -m mcp_server.server
 
 ## 📖 **Documentation**
 
+> **Operational Note (2025-10-03)**: `NmapTool` argument validation was hardened to accept optimizer defaults (`-T4`, `--max-parallelism 10`, `-Pn`, `--top-ports 1000`) and numeric values (e.g., `--top-ports 200`). If you encounter validation errors:
+> - Ensure flag/value pairs use either `--flag value` or `--flag=value` (both now supported).
+> - Large CIDR scans may exceed the default 300 s timeout; set `timeout_sec` or narrow the target range.
+> - OS detection (`-O`) still requires root privileges in the execution environment; run without `-O` or supply elevated permissions if appropriate.
+
 ### **Architecture Overview**
 
 ```mermaid
