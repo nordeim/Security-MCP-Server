@@ -233,7 +233,7 @@ graph TB
 
 ```mermaid
 flowchart LR
-    Client[Client / Coding Agent] --> Transport{Transport Layer\nHTTP or stdio}
+    Client[Client - Coding Agent] --> Transport{Transport Layer: HTTP or stdio}
     Transport --> Router[FastAPI Router]
     Router --> Registry[Tool Registry]
     Registry --> Executor[MCPBaseTool Executor]
@@ -241,8 +241,8 @@ flowchart LR
     Subprocess -->|stdout/stderr| Executor
     Executor --> Metrics[Prometheus Metrics]
     Executor --> Health[Health Check Aggregator]
-    Metrics --> Observability[Prometheus / Grafana]
-    Health --> HealthAPI[/health Endpoint]
+    Metrics --> Observability[Prometheus & Grafana]
+    Health --> HealthAPI[health endpoint]
     Executor --> Response[API Response]
     Response --> Client
 ```
