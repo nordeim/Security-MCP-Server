@@ -6,7 +6,7 @@ import logging
 import shlex
 import os
 import ipaddress
-from typing import List, Sequence, Tuple, Optional, Dict, Any
+from typing import List, Sequence, Tuple, Optional, Dict, Any, Union
 from datetime import datetime, timezone
 import re
 from urllib.parse import urlparse
@@ -78,6 +78,28 @@ class GobusterTool(MCPBaseTool):
         "--retry-attempts",            # Number of retry attempts
     )
     
+    # Base class integration metadata
+    _EXTRA_ALLOWED_TOKENS = {"dir", "dns", "vhost"}
+    _FLAGS_REQUIRE_VALUE = {
+        "-w", "--wordlist",
+        "-t", "--threads",
+        "--timeout",
+        "-u", "--url",
+        "-d", "--domain",
+        "-s", "--status-codes",
+        "-x", "--extensions",
+        "-o", "--output",
+        "-H", "--header",
+        "-c", "--cookies",
+        "-a", "--useragent",
+        "-P", "--password",
+        "-U", "--username",
+        "--proxy",
+        "--retry",
+        "--retry-attempts",
+        "--delay"
+    }
+
     # Gobuster-specific settings
     default_timeout_sec: float = 1200.0  # 20 minutes for large wordlists
     concurrency: int = 1  # Single instance to prevent overwhelming targets
@@ -164,7 +186,11 @@ class GobusterTool(MCPBaseTool):
         
         try:
             # Parse arguments and extract mode
-            tokens = self._parse_safe_args(inp.extra_args or "")
+            parsed_tokens = self._parse_and_validate_args(inp.extra_args or "", inp)
+            if isinstance(parsed_tokens, ToolOutput):
+                return parsed_tokens
+
+            tokens = parsed_tokens
             mode, remaining_args = self._extract_mode_and_args(tokens)
             
             # Validate mode compatibility with target
@@ -218,43 +244,23 @@ class GobusterTool(MCPBaseTool):
         
         return None
     
-    def _parse_safe_args(self, extra_args: str) -> List[str]:
-        """Parse arguments safely with strict validation."""
+    def _parse_and_validate_args(self, extra_args: str, inp: ToolInput) -> Union[List[str], ToolOutput]:
+        """Parse arguments via base sanitizer and surface friendly errors."""
         try:
-            tokens = shlex.split(extra_args)
+            tokens = list(super()._parse_args(extra_args))
         except ValueError as e:
-            raise ValueError(f"Failed to parse arguments: {str(e)}")
-        
-        validated = []
-        for token in tokens:
-            if not token:
-                continue
-            
-            # Allow flags
-            if token.startswith("-"):
-                flag_base = token.split("=")[0] if "=" in token else token
-                if any(flag_base.startswith(allowed) for allowed in self.allowed_flags):
-                    validated.append(token)
-                else:
-                    raise ValueError(f"Flag not allowed: {token}")
-            
-            # Check if it's a mode (first non-flag should be mode)
-            elif not validated and token in self.ALLOWED_MODES:
-                validated.append(token)
-            
-            # Check if it's a value for a previous flag
-            elif validated and validated[-1].startswith("-"):
-                # This is likely a value for the previous flag
-                # Apply strict validation
-                if not re.match(r'^[A-Za-z0-9._/:\-,=@]+$', token):
-                    raise ValueError(f"Invalid argument value: {token}")
-                validated.append(token)
-            
-            else:
-                # Non-flag token that's not a mode or flag value - block it
-                raise ValueError(f"Unexpected token (potential injection): {token}")
-        
-        return validated
+            error_context = ErrorContext(
+                error_type=ToolErrorType.VALIDATION_ERROR,
+                message=str(e),
+                recovery_suggestion="Review gobuster flags and values",
+                timestamp=self._get_timestamp(),
+                tool_name=self.tool_name,
+                target=inp.target,
+                metadata={"error": str(e)}
+            )
+            return self._create_error_output(error_context, inp.correlation_id or "")
+
+        return tokens
     
     def _extract_mode_and_args(self, tokens: List[str]) -> Tuple[str, List[str]]:
         """Extract gobuster mode with exact matching."""

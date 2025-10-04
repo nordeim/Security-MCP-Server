@@ -6,7 +6,7 @@ import logging
 import shlex
 import ipaddress
 from datetime import datetime, timezone
-from typing import Sequence, Optional, Dict, Any
+from typing import Sequence, Optional, Dict, Any, Union, List
 import re
 import math
 
@@ -62,6 +62,26 @@ class MasscanTool(MCPBaseTool):
         "--ttl",                      # TTL value
     )
     
+    # Base class integration metadata
+    _EXTRA_ALLOWED_TOKENS = set()
+    _FLAGS_REQUIRE_VALUE = {
+        "-p", "--ports",
+        "--rate", "--max-rate",
+        "--wait",
+        "--retries",
+        "--connection-timeout",
+        "--ttl",
+        "--source-port",
+        "-e", "--interface",
+        "--source-ip",
+        "--router-ip",
+        "--router-mac",
+        "--adapter-ip",
+        "--adapter-mac",
+        "--exclude",
+        "--excludefile"
+    }
+
     # Masscan-specific settings
     default_timeout_sec: float = 300.0
     concurrency: int = 1  # Single instance due to high resource usage
@@ -76,6 +96,7 @@ class MasscanTool(MCPBaseTool):
     DEFAULT_RATE = 1000           # Default packets per second
     MAX_RATE = 100000             # Maximum allowed rate (can be overridden by config)
     MIN_RATE = 100                # Minimum rate for safety
+    DEFAULT_WAIT = 1              # Default wait time between packets
     
     def __init__(self):
         """Initialize Masscan tool with enhanced features."""
@@ -136,19 +157,9 @@ class MasscanTool(MCPBaseTool):
             return validation_result
         
         # Parse and validate arguments
-        try:
-            parsed_args = self._parse_and_validate_args(inp.extra_args or "")
-        except ValueError as e:
-            error_context = ErrorContext(
-                error_type=ToolErrorType.VALIDATION_ERROR,
-                message=f"Invalid arguments: {str(e)}",
-                recovery_suggestion="Check argument syntax and rate limits",
-                timestamp=self._get_timestamp(),
-                tool_name=self.tool_name,
-                target=inp.target,
-                metadata={"error": str(e)}
-            )
-            return self._create_error_output(error_context, inp.correlation_id or "")
+        parsed_args = self._parse_and_validate_args(inp.extra_args or "", inp)
+        if isinstance(parsed_args, ToolOutput):
+            return parsed_args
         
         # Apply safety optimizations
         safe_args = self._apply_safety_limits(parsed_args)
@@ -229,26 +240,27 @@ class MasscanTool(MCPBaseTool):
         bits_needed = math.ceil(math.log2(max_hosts))
         return max(0, 32 - bits_needed)
     
-    def _parse_and_validate_args(self, extra_args: str) -> str:
+    def _parse_and_validate_args(self, extra_args: str, inp: ToolInput) -> Union[str, ToolOutput]:
         """Parse and validate masscan arguments with strict security."""
-        if not extra_args:
-            return ""
-        
         try:
-            tokens = shlex.split(extra_args)
+            tokens = list(super()._parse_args(extra_args))
         except ValueError as e:
-            raise ValueError(f"Failed to parse arguments: {str(e)}")
-        
-        validated = []
+            error_context = ErrorContext(
+                error_type=ToolErrorType.VALIDATION_ERROR,
+                message=str(e),
+                recovery_suggestion="Check argument syntax and rate limits",
+                timestamp=self._get_timestamp(),
+                tool_name=self.tool_name,
+                target=inp.target,
+                metadata={"error": str(e)}
+            )
+            return self._create_error_output(error_context, inp.correlation_id or "")
+
+        validated: List[str] = []
         i = 0
         while i < len(tokens):
             token = tokens[i]
-            
-            # Check if it's a flag
-            if not token.startswith("-"):
-                # Non-flag token - this is a security risk, block it
-                raise ValueError(f"Unexpected non-flag token (potential injection): {token}")
-            
+
             # Check rate specifications
             if token in ("--rate", "--max-rate"):
                 if i + 1 < len(tokens):
@@ -264,66 +276,113 @@ class MasscanTool(MCPBaseTool):
                             rate = self.MIN_RATE
                         validated.extend([token, str(rate)])
                     except ValueError:
-                        raise ValueError(f"Invalid rate specification: {rate_spec}")
+                        return self._create_error_output(
+                            ErrorContext(
+                                error_type=ToolErrorType.VALIDATION_ERROR,
+                                message=f"Invalid rate specification: {rate_spec}",
+                                recovery_suggestion="Use numeric packet rate",
+                                timestamp=self._get_timestamp(),
+                                tool_name=self.tool_name,
+                                target=inp.target,
+                                metadata={"flag": token, "value": rate_spec}
+                            ),
+                            inp.correlation_id or ""
+                        )
                     i += 2
-                else:
-                    raise ValueError(f"{token} requires a value")
-            
+                    continue
+                return self._create_error_output(
+                    ErrorContext(
+                        error_type=ToolErrorType.VALIDATION_ERROR,
+                        message=f"{token} requires a value",
+                        recovery_suggestion="Provide numeric rate value",
+                        timestamp=self._get_timestamp(),
+                        tool_name=self.tool_name,
+                        target=inp.target,
+                        metadata={"flag": token}
+                    ),
+                    inp.correlation_id or ""
+                )
+
             # Check port specifications
-            elif token in ("-p", "--ports"):
+            if token in ("-p", "--ports"):
                 if i + 1 < len(tokens):
                     port_spec = tokens[i + 1]
                     if not self._validate_port_specification(port_spec):
-                        raise ValueError(f"Invalid port specification: {port_spec}")
+                        return self._create_error_output(
+                            ErrorContext(
+                                error_type=ToolErrorType.VALIDATION_ERROR,
+                                message=f"Invalid port specification: {port_spec}",
+                                recovery_suggestion="Use formats like 80,443 or 1-1024",
+                                timestamp=self._get_timestamp(),
+                                tool_name=self.tool_name,
+                                target=inp.target,
+                                metadata={"flag": token, "value": port_spec}
+                            ),
+                            inp.correlation_id or ""
+                        )
                     validated.extend([token, port_spec])
                     i += 2
-                else:
-                    raise ValueError(f"Port flag {token} requires a value")
-            
+                    continue
+                return self._create_error_output(
+                    ErrorContext(
+                        error_type=ToolErrorType.VALIDATION_ERROR,
+                        message=f"Port flag {token} requires a value",
+                        recovery_suggestion="Provide port list or range",
+                        timestamp=self._get_timestamp(),
+                        tool_name=self.tool_name,
+                        target=inp.target,
+                        metadata={"flag": token}
+                    ),
+                    inp.correlation_id or ""
+                )
+
             # Check banner grabbing (controlled by policy)
-            elif token == "--banners":
+            if token == "--banners":
                 if not self.allow_intrusive:
                     log.warning("masscan.banners_blocked intrusive_not_allowed")
                     i += 1
                     continue
                 validated.append(token)
                 i += 1
-            
+                continue
+
             # Check interface specifications
-            elif token in ("-e", "--interface"):
+            if token in ("-e", "--interface"):
                 if i + 1 < len(tokens):
                     interface = tokens[i + 1]
-                    # Basic interface name validation
-                    if not re.match(r'^[a-zA-Z0-9_\-\.]+$', interface):
-                        raise ValueError(f"Invalid interface name: {interface}")
+                    if not re.match(r'^[a-zA-Z0-9_\-.]+$', interface):
+                        return self._create_error_output(
+                            ErrorContext(
+                                error_type=ToolErrorType.VALIDATION_ERROR,
+                                message=f"Invalid interface name: {interface}",
+                                recovery_suggestion="Use simple interface identifiers (e.g., eth0)",
+                                timestamp=self._get_timestamp(),
+                                tool_name=self.tool_name,
+                                target=inp.target,
+                                metadata={"flag": token, "value": interface}
+                            ),
+                            inp.correlation_id or ""
+                        )
                     validated.extend([token, interface])
                     i += 2
-                else:
-                    raise ValueError(f"Interface flag {token} requires a value")
-            
-            # Check other flags
-            else:
-                flag_base = token.split("=")[0] if "=" in token else token
-                if any(flag_base.startswith(allowed) for allowed in self.allowed_flags):
-                    # Check if flag expects a value
-                    if token in ("--wait", "--retries", "--connection-timeout", "--ttl",
-                                "--router-ip", "--router-mac", "--source-ip", "--source-port",
-                                "--adapter-ip", "--adapter-mac", "--exclude", "--excludefile"):
-                        if i + 1 < len(tokens) and not tokens[i + 1].startswith("-"):
-                            # Validate the value
-                            value = tokens[i + 1]
-                            if not re.match(r'^[A-Za-z0-9._/:\-,]+$', value):
-                                raise ValueError(f"Invalid value for {token}: {value}")
-                            validated.extend([token, value])
-                            i += 2
-                        else:
-                            raise ValueError(f"{token} requires a value")
-                    else:
-                        validated.append(token)
-                        i += 1
-                else:
-                    raise ValueError(f"Flag not allowed: {token}")
-        
+                    continue
+                return self._create_error_output(
+                    ErrorContext(
+                        error_type=ToolErrorType.VALIDATION_ERROR,
+                        message=f"Interface flag {token} requires a value",
+                        recovery_suggestion="Specify interface name after the flag",
+                        timestamp=self._get_timestamp(),
+                        tool_name=self.tool_name,
+                        target=inp.target,
+                        metadata={"flag": token}
+                    ),
+                    inp.correlation_id or ""
+                )
+
+            # For other flags, rely on base sanitizer output
+            validated.append(token)
+            i += 1
+
         return " ".join(validated)
     
     def _validate_port_specification(self, port_spec: str) -> bool:

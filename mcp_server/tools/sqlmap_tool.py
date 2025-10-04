@@ -4,11 +4,19 @@ Enhanced Sqlmap tool with ALL framework features + comprehensive SQL injection s
 """
 import logging
 import re
-from typing import Sequence, Optional, List, Dict, Any
+import shlex
+from typing import Sequence, Optional, List, Dict, Any, Union
 from urllib.parse import urlparse
 
 # ORIGINAL IMPORT - PRESERVED EXACTLY
-from mcp_server.base_tool import MCPBaseTool, ToolInput, ToolOutput, ToolErrorType, ErrorContext
+from mcp_server.base_tool import (
+    MCPBaseTool,
+    ToolInput,
+    ToolOutput,
+    ToolErrorType,
+    ErrorContext,
+    _TOKEN_ALLOWED,
+)
 
 # ENHANCED IMPORT (ADDITIONAL)
 from mcp_server.config import get_config
@@ -79,6 +87,7 @@ class SqlmapTool(MCPBaseTool):
         # Technical flags (safe)
         "--technique",                  # SQL injection techniques
         "--time-sec",                   # Time-based delay
+        "--threads",                    # Worker threads
         "--union-cols",                 # Union columns
         "--cookie",                     # HTTP cookie
         "--user-agent",                 # HTTP user agent
@@ -91,6 +100,25 @@ class SqlmapTool(MCPBaseTool):
         "--json",                       # JSON output format
         "--xml",                        # XML output format
     ]
+    
+    _EXTRA_ALLOWED_TOKENS = set()
+    _FLAGS_REQUIRE_VALUE = {
+        "-u", "--url",
+        "--risk",
+        "--level",
+        "--technique",
+        "--time-sec",
+        "--threads",
+        "--union-cols",
+        "--cookie",
+        "--user-agent",
+        "--referer",
+        "--headers",
+        "--output-dir",
+        "-D",
+        "-T",
+        "-C",
+    }
     
     # ORIGINAL TIMEOUT AND CONCURRENCY - PRESERVED EXACTLY
     default_timeout_sec: float = 1800.0  # 30 minutes for comprehensive SQL testing
@@ -154,14 +182,18 @@ class SqlmapTool(MCPBaseTool):
             )
             return self._create_error_output(error_context, inp.correlation_id)
 
+        sanitized_args = self._parse_and_validate_args(secured_args, inp)
+        if isinstance(sanitized_args, ToolOutput):
+            return sanitized_args
+
         # Create enhanced input with security measures
         enhanced_input = ToolInput(
             target=inp.target,
-            extra_args=secured_args,
+            extra_args=sanitized_args,
             timeout_sec=timeout_sec or self.default_timeout_sec,
             correlation_id=inp.correlation_id
         )
-        
+
         # ORIGINAL: Use parent _execute_tool method which calls _spawn
         return await super()._execute_tool(enhanced_input, timeout_sec)
     
@@ -252,7 +284,7 @@ class SqlmapTool(MCPBaseTool):
         if not extra_args:
             return ""
         
-        args = extra_args.split()
+        args = shlex.split(extra_args)
         secured = []
         
         # Track security settings
@@ -363,6 +395,64 @@ class SqlmapTool(MCPBaseTool):
         secured.extend(["--threads", "5"])       # Limited threads
         
         return " ".join(secured)
+
+    def _parse_and_validate_args(self, secured_args: str, inp: ToolInput) -> Union[str, ToolOutput]:
+        """Validate secured arguments with base sanitizer while tolerating payload tokens."""
+        if not secured_args:
+            return ""
+
+        tokens = shlex.split(secured_args)
+        placeholder_map: Dict[str, str] = {}
+        sanitized_parts: List[str] = []
+
+        for idx, token in enumerate(tokens):
+            if self._is_base_token_allowed(token):
+                sanitized_parts.append(token)
+                continue
+
+            if not self._is_safe_payload_token(token):
+                error_context = ErrorContext(
+                    error_type=ToolErrorType.VALIDATION_ERROR,
+                    message=f"Unsupported sqlmap payload token: {token}",
+                    recovery_suggestion="Review URL/query fragments or sanitize characters (letters, digits, /, :, -, _, ?, =, &, %)",
+                    timestamp=self._get_timestamp(),
+                    tool_name=self.tool_name,
+                    target=inp.target,
+                    metadata={"token": token}
+                )
+                return self._create_error_output(error_context, inp.correlation_id or "")
+
+            placeholder = f"__SQLMAP_TOKEN_{idx}__"
+            placeholder_map[placeholder] = token
+            sanitized_parts.append(placeholder)
+
+        sanitized_string = " ".join(sanitized_parts)
+
+        try:
+            base_tokens = list(super()._parse_args(sanitized_string))
+        except ValueError as e:
+            error_context = ErrorContext(
+                error_type=ToolErrorType.VALIDATION_ERROR,
+                message=str(e),
+                recovery_suggestion="Check sqlmap flags and ensure payload placeholders resolve correctly",
+                timestamp=self._get_timestamp(),
+                tool_name=self.tool_name,
+                target=inp.target,
+                metadata={"error": str(e)}
+            )
+            return self._create_error_output(error_context, inp.correlation_id or "")
+
+        restored_tokens = [placeholder_map.get(token, token) for token in base_tokens]
+        return " ".join(restored_tokens)
+
+    def _is_base_token_allowed(self, token: str) -> bool:
+        return bool(_TOKEN_ALLOWED.match(token))
+
+    _PAYLOAD_PATTERN = re.compile(r"^[A-Za-z0-9_:/\-\.\?=&%]+$")
+
+    def _is_safe_payload_token(self, token: str) -> bool:
+        """Allow sqlmap payloads with ? and & so long as they are sanitized."""
+        return bool(self._PAYLOAD_PATTERN.fullmatch(token) and ".." not in token)
     
     def _is_safe_flag(self, flag: str) -> bool:
         """Check if a flag is in the allowed list (ENHANCED FEATURE)."""
