@@ -259,6 +259,8 @@ flowchart LR
 | **NmapTool** | Network discovery & port scanning | Service detection, OS fingerprinting, script scanning | Max 1024 hosts, rate limiting, safe scripts only |
 | **MasscanTool** | High-speed port scanning | Banner grabbing, large network support | Rate limited to 1000 pps, max /16 networks |
 | **GobusterTool** | Content & DNS discovery | Directory brute-force, subdomain enum, vhost discovery | Thread limits, wordlist validation |
+| **HydraTool** | Authentication resilience testing | HTTP form payload placeholders, default credential injection, thread caps | Requires RFC1918 or `.lab.internal` targets; preserves `^USER^`/`^PASS^` tokens with sanitizer placeholders |
+| **SqlmapTool** | SQL injection detection/exploitation | Risk/test level clamping, mandatory `--batch`, payload placeholders | Enforces `--batch`, clamps `--risk`/`--level`, sanitizes query strings |
 
 ### **API Reference**
 
@@ -535,8 +537,15 @@ See [deployment/aws-ecs](deployment/aws-ecs) for CloudFormation templates and ta
 ## 🧪 **Testing**
 
 ```bash
-# Run all tests
+# Activate the project virtual environment (created by launcher or manual setup)
+source /opt/venv/bin/activate  # or . /opt/venv/bin/activate
+
+# Run all regression tests, including tool sanitizers
 pytest
+
+# Focus on refactored tool suites
+pytest tests/test_gobuster_tool.py tests/test_masscan_tool.py \
+       tests/test_hydra_tool.py tests/test_sqlmap_tool.py
 
 # Run with coverage
 pytest --cov=mcp_server --cov-report=html

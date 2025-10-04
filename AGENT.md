@@ -21,6 +21,8 @@
 - **`NmapTool`**: enforces network size caps, flag allowlists, script category policies, auto-injects safe performance flags (e.g., `-T4`, `--top-ports 1000`).
 - **`MasscanTool`**: rate-limits scans, validates ports/interfaces, toggles intrusive banner grabbing via config.
 - **`GobusterTool`**: mode-aware (dir/dns/vhost), validates targets (URL vs domain), enforces wordlist/thread safety.
+- **`HydraTool`**: preserves HTTP form payload tokens via placeholder sanitizer, injects safe defaults (`-l admin`, `-P /usr/share/wordlists/common-passwords.txt`) when missing, enforces RFC1918 / `.lab.internal` targets, clamps threads.
+- **`SqlmapTool`**: mandates `--batch`, clamps `--risk`/`--level`, restores query parameters after sanitizer placeholders, rejects disallowed characters early.
 - All tools load shared policy from `get_config()` (intrusive enablement, timeouts, concurrency).
 
 ## Configuration & Policy (`mcp_server/config.py`)
@@ -45,6 +47,11 @@
 1. Subclass `MCPBaseTool` in `mcp_server/tools/`, define `command_name`, `allowed_flags`, override `_execute_tool()` only when necessary.
 2. Register supporting binaries in launcher script & Docker image to satisfy health checks.
 3. Update docs (`README.md`, `docs/`) and metrics/alerts if the new tool introduces novel failure modes.
+
+## Testing Workflow
+  - Activate the shared environment: `source /opt/venv/bin/activate`
+  - Run targeted regression suites: `pytest tests/test_gobuster_tool.py tests/test_masscan_tool.py tests/test_hydra_tool.py tests/test_sqlmap_tool.py`
+  - Full suite: `pytest`
 
 ## Quick Reference Endpoints
 - `GET /health` → aggregated status with per-check metadata.
