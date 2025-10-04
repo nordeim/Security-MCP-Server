@@ -95,6 +95,14 @@ class NmapTool(MCPBaseTool):
         "dns-zone-transfer", "snmp-brute", "http-slowloris"
     }
     
+    _EXTRA_ALLOWED_TOKENS = {"-T4", "--max-parallelism", "10", "-Pn", "--top-ports", "1000"}
+    _FLAGS_REQUIRE_VALUE = {
+        "-p", "--ports", "--max-parallelism", "--version-intensity",
+        "--min-rate", "--max-rate", "--max-retries", "--host-timeout",
+        "--top-ports", "--scan-delay", "--max-scan-delay", "--mtu",
+        "--data-length", "--ttl", "--source-port", "-g"
+    }
+
     def __init__(self):
         """Initialize Nmap tool with enhanced features."""
         super().__init__()
@@ -337,24 +345,34 @@ class NmapTool(MCPBaseTool):
             
             # Check other flags
             else:
-                flag_base = token.split("=")[0] if "=" in token else token
-                if any(flag_base.startswith(allowed) for allowed in self.allowed_flags):
-                    # Check if flag expects a value
-                    if flag_base in ("--max-parallelism", "--version-intensity", "--min-rate",
-                                    "--max-rate", "--max-retries", "--host-timeout", "--top-ports",
-                                    "--scan-delay", "--max-scan-delay", "--mtu", "--data-length",
-                                    "--ttl", "--source-port", "-g"):
-                        if i + 1 < len(tokens):
-                            value = tokens[i + 1]
-                            # Validate the value is numeric or simple
-                            if not re.match(r'^[0-9ms]+$', value):
-                                raise ValueError(f"Invalid value for {token}: {value}")
-                            validated.extend([token, value])
-                            i += 2
-                        else:
-                            raise ValueError(f"{token} requires a value")
+                flag_base, flag_value = (token.split("=", 1) + [None])[:2]
+                if flag_base in self.allowed_flags:
+                    expects_value = flag_base in {
+                        "--max-parallelism", "--version-intensity", "--min-rate",
+                        "--max-rate", "--max-retries", "--host-timeout", "--top-ports",
+                        "--scan-delay", "--max-scan-delay", "--mtu", "--data-length",
+                        "--ttl", "--source-port", "-g"
+                    }
+
+                    if flag_value is not None:
+                        if not expects_value:
+                            raise ValueError(f"Flag does not take inline value: {token}")
+                        if not self._validate_numeric_value(flag_base, flag_value):
+                            raise ValueError(f"Invalid value for {flag_base}: {flag_value}")
+                        validated.extend([flag_base, flag_value])
+                        i += 1
+                        continue
+
+                    if expects_value:
+                        if i + 1 >= len(tokens):
+                            raise ValueError(f"{flag_base} requires a value")
+                        value = tokens[i + 1]
+                        if not self._validate_numeric_value(flag_base, value):
+                            raise ValueError(f"Invalid value for {flag_base}: {value}")
+                        validated.extend([flag_base, value])
+                        i += 2
                     else:
-                        validated.append(token)
+                        validated.append(flag_base)
                         i += 1
                 else:
                     raise ValueError(f"Flag not allowed: {token}")
@@ -440,40 +458,47 @@ class NmapTool(MCPBaseTool):
         
         return ','.join(allowed_scripts) if allowed_scripts else ""
     
+    def _validate_numeric_value(self, flag: str, value: str) -> bool:
+        """Validate numeric-like values for flags that expect numbers or durations."""
+        if flag in {"--host-timeout", "--scan-delay", "--max-scan-delay"}:
+            return bool(re.match(r'^[0-9]+(ms|s|m)?$', value))
+        if flag in {"--max-parallelism", "--version-intensity", "--min-rate",
+                    "--max-rate", "--max-retries", "--top-ports", "--mtu",
+                    "--data-length", "--ttl", "--source-port", "-g"}:
+            return value.isdigit()
+        return False
+
     def _optimize_nmap_args(self, extra_args: str) -> str:
         """Optimize nmap arguments for performance and safety."""
         if not extra_args:
             extra_args = ""
-        
+
         try:
             tokens = shlex.split(extra_args) if extra_args else []
         except ValueError:
             tokens = extra_args.split() if extra_args else []
-        
+
         optimized = []
-        
-        # Check what's already specified
+
         has_timing = any(t.startswith("-T") for t in tokens)
-        has_parallelism = any("--max-parallelism" in t for t in tokens)
+        has_parallelism = any(t in {"--max-parallelism", "--max-parallelism=10"} for t in tokens)
         has_host_discovery = any(t in ("-Pn", "-sn", "-PS", "-PA") for t in tokens)
         has_port_spec = any(t in ("-p", "--ports", "--top-ports") for t in tokens)
-        
-        # Add optimizations
+
         if not has_timing:
-            optimized.append("-T4")  # Aggressive timing
-        
+            optimized.append("-T4")
+
         if not has_parallelism:
-            optimized.append("--max-parallelism=10")  # Limit parallel probes
-        
+            optimized.extend(["--max-parallelism", "10"])
+
         if not has_host_discovery:
-            optimized.append("-Pn")  # Skip host discovery for speed
-        
+            optimized.append("-Pn")
+
         if not has_port_spec:
-            optimized.append("--top-ports=1000")  # Scan top 1000 ports by default
-        
-        # Add existing arguments
+            optimized.extend(["--top-ports", "1000"])
+
         optimized.extend(tokens)
-        
+
         return " ".join(optimized)
     
     def _get_timestamp(self) -> datetime:

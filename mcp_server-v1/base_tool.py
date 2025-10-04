@@ -65,7 +65,7 @@ except ImportError:
 log = logging.getLogger(__name__)
 
 _DENY_CHARS = re.compile(r"[;&|`$><\n\r]")
-_TOKEN_ALLOWED = re.compile(r"^[A-Za-z0-9.:/=+-,@%_]+$")
+_TOKEN_ALLOWED = re.compile(r"^[A-Za-z0-9.:/=+,\-@%_]+$")
 _HOSTNAME_PATTERN = re.compile(r'^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?$')
 _MAX_ARGS_LEN = int(os.getenv("MCP_MAX_ARGS_LEN", "2048"))
 _MAX_STDOUT_BYTES = int(os.getenv("MCP_MAX_STDOUT_BYTES", "1048576"))
@@ -453,25 +453,49 @@ class MCPBaseTool(ABC):
     
     def _parse_args(self, extra_args: str) -> Sequence[str]:
         """Parse and validate arguments."""
-        if not extra_args:
-            return []
-        
-        tokens = shlex.split(extra_args)
+        try:
+            tokens = shlex.split(extra_args) if extra_args else []
+        except ValueError as e:
+            raise ValueError(f"Failed to parse arguments: {str(e)}")
+        return self._sanitize_tokens(tokens)
+
+    def _sanitize_tokens(self, tokens: Sequence[str]) -> Sequence[str]:
+        """Sanitize token list - block shell metacharacters"""
         safe = []
-        
+        flags_require_value = set(getattr(self, "_FLAGS_REQUIRE_VALUE", []))
+
         for t in tokens:
+            t = t.strip()
             if not t:
                 continue
             if not _TOKEN_ALLOWED.match(t):
-                raise ValueError(f"Disallowed token in args: {t!r}")
+                # Permit leading dash flags and pure numeric values even if the
+                # strict regex rejects them (e.g., optimizer defaults like "-T4" or "10").
+                if not (t.startswith("-") or t.isdigit()):
+                    raise ValueError(f"Disallowed token in args: {t!r}")
             safe.append(t)
-        
+
         if self.allowed_flags is not None:
-            allowed = tuple(self.allowed_flags)
-            for t in safe:
-                if t.startswith("-") and not t.startswith(allowed):
-                    raise ValueError(f"Flag not allowed: {t!r}")
-        
+            allowed = set(self.allowed_flags)
+            # Allow subclasses to provide additional safe tokens (e.g., optimizer defaults)
+            allowed.update(getattr(self, "_EXTRA_ALLOWED_TOKENS", []))
+            expect_value_for: Optional[str] = None
+            for token in safe:
+                if expect_value_for is not None:
+                    # Treat this token as the value for the preceding flag.
+                    expect_value_for = None
+                    continue
+                base = token.split("=", 1)[0]
+                if base not in allowed:
+                    # Allow the token if it's the value for a prior flag requiring one.
+                    if token not in flags_require_value and not token.isdigit():
+                        raise ValueError(f"Flag not allowed: {token}")
+                    continue
+                if base in flags_require_value and "=" not in token:
+                    expect_value_for = base
+            if expect_value_for is not None:
+                raise ValueError(f"{expect_value_for} requires a value")
+
         return safe
     
     def _set_resource_limits(self):
