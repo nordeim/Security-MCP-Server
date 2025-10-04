@@ -1,4 +1,4 @@
-"""Shared pytest fixtures for tool regression tests.
+"""Shared pytest fixtures for tool regression tests (staging copy).
 
 References:
 - docs/tool_tests_todo.md
@@ -8,7 +8,7 @@ from __future__ import annotations
 import pathlib
 import sys
 from types import SimpleNamespace
-from typing import Callable, Iterable, Protocol
+from typing import Callable, Iterable, Optional, Protocol
 
 import pytest
 
@@ -39,20 +39,30 @@ def tool_runtime_stub(monkeypatch: pytest.MonkeyPatch) -> Callable[[SupportsSpaw
 
 
 @pytest.fixture
-def make_input() -> Callable[[str, str | None], SimpleNamespace]:
+def make_input() -> Callable[[str, Optional[str], str, Optional[float]], SimpleNamespace]:
     """Create lightweight ToolInput substitutes without triggering Pydantic validators."""
 
-    def _factory(target: str = "192.168.0.10", correlation_id: str | None = None) -> SimpleNamespace:
-        return SimpleNamespace(target=target, correlation_id=correlation_id or "test-correlation")
+    def _factory(
+        target: str = "192.168.0.10",
+        correlation_id: Optional[str] = None,
+        extra_args: str = "",
+        timeout_sec: Optional[float] = None,
+    ) -> SimpleNamespace:
+        return SimpleNamespace(
+            target=target,
+            correlation_id=correlation_id or "test-correlation",
+            extra_args=extra_args,
+            timeout_sec=timeout_sec,
+        )
 
     return _factory
 
 
 @pytest.fixture
-def assert_validation_error() -> Callable[[ToolOutput, str | None], None]:
+def assert_validation_error() -> Callable[[ToolOutput, Optional[str]], None]:
     """Assertion helper for validation error ToolOutput objects."""
 
-    def _assert(output: ToolOutput, expected_substring: str | None = None) -> None:
+    def _assert(output: ToolOutput, expected_substring: Optional[str] = None) -> None:
         assert isinstance(output, ToolOutput)
         assert output.returncode == 1
         assert output.error_type == ToolErrorType.VALIDATION_ERROR.value
