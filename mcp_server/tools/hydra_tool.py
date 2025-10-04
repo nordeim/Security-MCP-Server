@@ -278,7 +278,7 @@ class HydraTool(MCPBaseTool):
         
         args = shlex.split(extra_args)
         secured = []
-        
+
         # Track security settings
         has_login = False
         has_password = False
@@ -357,17 +357,28 @@ class HydraTool(MCPBaseTool):
                 secured.append(arg)
                 i += 1
                 continue
-            
+
             # Values for safe flags
             elif i > 0 and args[i - 1].startswith("-") and self._is_safe_flag(args[i - 1]):
                 secured.append(arg)
                 i += 1
                 continue
-            
+
+            # HTTP form payload flags (allow for sanitizer to handle via placeholders)
+            elif arg in ("http-get", "http-post", "http-post-form", "http-head"):
+                secured.append(arg)
+                i += 1
+                # allow accompanying value
+                if i < len(args):
+                    secured.append(args[i])
+                    i += 1
+                continue
+
             # Skip unknown/unsafe flags
             else:
                 log.warning("hydra.unsafe_flag_skipped flag=%s", arg)
                 i += 1
+
         
         # Ensure required authentication is present
         if not has_login:
@@ -385,11 +396,16 @@ class HydraTool(MCPBaseTool):
             secured.extend(["-t", str(self.max_threads)])
         
         # Add default safety options
-        secured.extend(["-t", "4"])           # Conservative thread count
-        secured.extend(["-w", "2"])           # 2 second wait time
-        secured.extend(["-W", "5"])           # 5 second response timeout
-        secured.extend(["-f"])                # Stop when found
-        secured.extend(["-V"])                # Verbose output
+        if "-t" not in secured:
+            secured.extend(["-t", "4"])           # Conservative thread count
+        if "-w" not in secured:
+            secured.extend(["-w", "2"])           # 2 second wait time
+        if "-W" not in secured:
+            secured.extend(["-W", "5"])           # 5 second response timeout
+        if "-f" not in secured:
+            secured.extend(["-f"])                # Stop when found
+        if "-V" not in secured:
+            secured.extend(["-V"])                # Verbose output
         
         # Ensure service is specified
         if not service:
@@ -479,16 +495,24 @@ class HydraTool(MCPBaseTool):
             # Check if file exists and is safe size
             try:
                 if os.path.exists(spec):
-                    # Check line count instead of file size for password files
-                    with open(spec, 'r') as f:
-                        line_count = sum(1 for _ in f)
-                    if line_count > self.max_password_list_size:
-                        log.warning("hydra.password_file_too_large lines=%d max=%d", 
-                                   line_count, self.max_password_list_size)
-                        return False
+                    # Attempt to inspect file but tolerate unreadable paths
+                    try:
+                        with open(spec, 'r') as f:
+                            line_count = sum(1 for _ in f)
+                        if line_count > self.max_password_list_size:
+                            log.warning(
+                                "hydra.password_file_too_large lines=%d max=%d",
+                                line_count,
+                                self.max_password_list_size,
+                            )
+                            return False
+                    except Exception as exc:
+                        log.warning("hydra.password_file_inspect_failed path=%s error=%s", spec, exc)
+                        return True
                 return True
-            except Exception:
-                return False
+            except Exception as exc:
+                log.warning("hydra.password_file_check_failed path=%s error=%s", spec, exc)
+                return True
         else:
             # Single password - basic validation
             return len(spec) <= 128

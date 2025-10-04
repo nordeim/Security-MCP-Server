@@ -45,7 +45,7 @@ def test_missing_auth_injects_defaults(tool: HydraTool) -> None:
 
 
 def test_unauthorized_target_rejected(tool: HydraTool, assert_validation_error) -> None:
-    inp = SimpleNamespace(target="203.0.113.5:ssh", extra_args="-l admin -p password", correlation_id="hydra-test")
+    inp = SimpleNamespace(target="8.8.8.8:ssh", extra_args="-l admin -p password", correlation_id="hydra-test")
     output = tool._validate_hydra_requirements(inp)
     assert output is not None
     assert_validation_error(output, "Unauthorized Hydra target")
